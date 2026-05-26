@@ -1762,3 +1762,189 @@ def list_cleanup_audit(
         }
         for r in rows
     ]
+
+@router.get("/certificates/{certification_id}/preview")
+def preview_certificate_delete(
+    certification_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+    _mfa=Depends(require_mfa_verified),
+):
+    cert = (
+        db.query(Certification)
+        .filter(Certification.certification_id == certification_id)
+        .first()
+    )
+
+    if not cert:
+        raise HTTPException(status_code=404, detail="Certificate not found")
+
+    team = db.query(Team).filter(Team.team_id == cert.team_id).first()
+    handler = (
+        db.query(Handler).filter(Handler.handler_id == team.handler_id).first()
+        if team else None
+    )
+    dog = (
+        db.query(Dog).filter(Dog.dog_id == team.dog_id).first()
+        if team else None
+    )
+    standard = db.query(Standard).filter(Standard.standard_id == cert.standard_id).first()
+
+    evaluator = (
+        db.query(User).filter(User.user_id == cert.issuer_user_id).first()
+        if cert.issuer_user_id else None
+    )
+
+    history_count = (
+        db.query(CertificationEvent)
+        .filter(CertificationEvent.certification_id == certification_id)
+        .count()
+    )
+
+    expires_at = _now() + TTL_SECONDS
+
+    hash_payload = {
+        "entity": "certificate",
+        "certification_id": certification_id,
+        "history_count": history_count,
+        "expires_at": expires_at,
+    }
+
+    label = (
+        f"Certificate {certification_id}: "
+        f"{getattr(handler, 'first_name', '') or ''} {getattr(handler, 'last_name', '') or ''} / "
+        f"{getattr(dog, 'name', '') or ''} / "
+        f"{getattr(standard, 'name', '') or ''}"
+    ).strip()
+
+    return {
+        "entity": "certificate",
+        "certificate_id": certification_id,
+        "certification_id": certification_id,
+        "team_id": cert.team_id,
+        "label": label,
+
+        "will_delete": {
+            "certification": 1,
+            "certification_events": history_count,
+            "certificate_signatures": 0,
+        },
+
+        "sample_ids": {
+            "certification_ids": [certification_id],
+            "team_ids": [cert.team_id] if cert.team_id else [],
+        },
+
+        "warnings": [
+            "Hard delete cannot be undone.",
+            "This removes the certificate record and its certification audit events.",
+            "Certificate signature snapshot deletion is not active yet because that model is not wired in.",
+        ],
+
+        "handler_name": (
+            f"{handler.first_name} {handler.last_name}" if handler else None
+        ),
+        "dog_name": dog.name if dog else None,
+        "standard_name": standard.name if standard else None,
+        "status": cert.status,
+        "date_awarded": cert.date_awarded,
+        "expires_at_value": cert.expires_at,
+        "location": cert.location,
+        "comment": cert.comment,
+        "evaluator_name": (
+            f"{evaluator.first_name} {evaluator.last_name}" if evaluator else None
+        ),
+
+        "blocked": False,
+        "expires_at": expires_at,
+        "confirm_hash": _hmac(hash_payload),
+        "confirm_text_required": f"DELETE CERTIFICATE {certification_id}",
+    }
+
+
+@router.post("/certificates/{certification_id}/hard-delete")
+def hard_delete_certificate(
+    certification_id: int,
+    body: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+    _mfa=Depends(require_mfa_verified),
+):
+    expires_at, confirm_hash = _require_confirm(
+        body,
+        expected_text=f"DELETE CERTIFICATE {certification_id}",
+    )
+
+    cert = (
+        db.query(Certification)
+        .filter(Certification.certification_id == certification_id)
+        .first()
+    )
+
+    if not cert:
+        raise HTTPException(status_code=404, detail="Certificate not found")
+
+    history_count = (
+        db.query(CertificationEvent)
+        .filter(CertificationEvent.certification_id == certification_id)
+        .count()
+    )
+
+    expected = _hmac({
+        "entity": "certificate",
+        "certification_id": certification_id,
+        "history_count": history_count,
+        "expires_at": expires_at,
+    })
+
+    if not hmac.compare_digest(expected, confirm_hash):
+        raise HTTPException(
+            status_code=409,
+            detail="Delete confirmation invalid. Re-run preview.",
+        )
+
+    try:
+        db.query(CertificationEvent).filter(
+            CertificationEvent.certification_id == certification_id
+        ).delete(synchronize_session=False)
+
+        db.query(Certification).filter(
+            Certification.certification_id == certification_id
+        ).delete(synchronize_session=False)
+
+        log_cleanup_event(
+            db,
+            actor_user_id=current_user.user_id,
+            action="hard_delete_certificate",
+            entity_type="certificate",
+            entity_id=certification_id,
+            entity_label=f"Certificate {certification_id}",
+            deleted_counts={
+                "certifications": 1,
+                "certification_events": history_count,
+                "certificate_signatures": 0,
+            },
+            affected_ids={
+                "certification_ids": [certification_id],
+                "team_ids": [cert.team_id] if cert.team_id else [],
+            },
+            warnings=[
+                "Certificate and certification events were hard-deleted.",
+                "Certificate signature snapshots were not deleted because that model is not wired in yet.",
+            ],
+            confirmation_text=f"DELETE CERTIFICATE {certification_id}",
+        )
+ 
+        db.commit()
+ 
+        return {
+            "status": "deleted",
+            "certificate_id": certification_id,
+            "certification_events": history_count,
+        }
+
+    except Exception:
+        db.rollback()
+        raise
+
+    
