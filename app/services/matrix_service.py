@@ -4,7 +4,7 @@ from datetime import date
 from typing import Any, Dict, List, Tuple, Optional
 from app.utils.auth import user_has_role
 from sqlalchemy.orm import Session, joinedload, contains_eager
-from sqlalchemy import func, or_
+from sqlalchemy import false, func, or_
 
 from app.models.discipline import Discipline
 from app.models.standard import Standard
@@ -454,14 +454,13 @@ def build_certification_matrix(db: Session, current_user: User, affiliation_id: 
             key = (team_id, disc_name)
             cert = best_cert_by_team_disc.get(key)
 
-
             if cert is None:
                 team_certs[disc_name] = {
                     "discipline_id": disc_name_to_id.get(disc_name),
                     # "status": "none",
                     # "certification_id": None,
                     "standard_id": applicable_std_by_disc_name.get(disc_name),
-
+                    "has_prior_cert_for_discipline": False,
                     # needed for add-cert / ownership UI
                     "is_owner": team_is_owner,
                     # "can_view": False,
@@ -619,8 +618,10 @@ def build_certification_matrix(db: Session, current_user: User, affiliation_id: 
                 "location": location,
                 "comment": comment,
                 "supervisor_id": supervisor_id_int,
+                "last_actor_user_id": last_actor_user_id_int,
                 "supervisor_name": supervisor_name,
                 "last_actor_name": last_actor_name,
+                "has_prior_cert_for_discipline": True,
 
                 "evaluation_complete": getattr(cert, "evaluation_complete", True),
                 "requires_co_evaluator": requires_co_evaluator,

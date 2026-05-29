@@ -93,6 +93,8 @@ class CertificationUpdate(BaseModel):
     location: Optional[str] = None
     comment: Optional[str] = None
     supervisor_id: Optional[int] = None
+    requires_co_evaluator: bool = False
+    evaluation_complete: Optional[bool] = None
     evaluation_complete: Optional[bool] = None
 
     @field_validator("date_awarded", mode="before")
@@ -131,6 +133,8 @@ class CertificationCorrectionIn(BaseModel):
     comment: str | None = None
     date_awarded: date | None = None
     expires_at: date | None = None
+    requires_co_evaluator: bool = False
+    evaluation_complete: Optional[bool] = None
     reason: str | None = None   # optional, but useful for audit
 
 class CertificationEventOut(BaseModel):

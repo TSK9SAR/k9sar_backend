@@ -26,6 +26,7 @@ class MatrixCell(BaseModel):
     certification_id: Optional[int] = None
     date_awarded: Optional[date] = None
     supervisor_id: Optional[int] = None
+    last_actor_user_id: Optional[int] = None
     supervisor_name: Optional[str] = None
 
     # add these if the frontend uses them

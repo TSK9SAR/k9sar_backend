@@ -1784,6 +1784,13 @@ def preview_certificate_delete(
         db.query(Handler).filter(Handler.handler_id == team.handler_id).first()
         if team else None
     )
+
+    handler_user = (
+        db.query(User).filter(User.user_id == handler.user_id).first()
+        if handler and handler.user_id
+        else None
+    )
+
     dog = (
         db.query(Dog).filter(Dog.dog_id == team.dog_id).first()
         if team else None
@@ -1810,12 +1817,22 @@ def preview_certificate_delete(
         "expires_at": expires_at,
     }
 
-    label = (
-        f"Certificate {certification_id}: "
-        f"{getattr(handler, 'first_name', '') or ''} {getattr(handler, 'last_name', '') or ''} / "
-        f"{getattr(dog, 'name', '') or ''} / "
-        f"{getattr(standard, 'name', '') or ''}"
-    ).strip()
+    handler_name = (
+        f"{handler_user.first_name} {handler_user.last_name}".strip()
+        if handler_user
+        else "Unknown handler"
+    )
+
+    evaluator_name = (
+        f"{evaluator.first_name} {evaluator.last_name}".strip()
+        if evaluator
+        else "Unknown evaluator"
+    )
+
+    dog_name = dog.name if dog else "Unknown dog"
+    standard_name = standard.name if standard else "Unknown standard"
+
+    label = f"Certificate {certification_id}: {handler_name} / {dog_name} / {standard_name} evaluated by {evaluator_name}"
 
     return {
         "entity": "certificate",
@@ -1841,26 +1858,21 @@ def preview_certificate_delete(
             "Certificate signature snapshot deletion is not active yet because that model is not wired in.",
         ],
 
-        "handler_name": (
-            f"{handler.first_name} {handler.last_name}" if handler else None
-        ),
-        "dog_name": dog.name if dog else None,
-        "standard_name": standard.name if standard else None,
+        "handler_name": handler_name,
+        "dog_name": dog_name,
+        "standard_name": standard_name,
         "status": cert.status,
         "date_awarded": cert.date_awarded,
         "expires_at_value": cert.expires_at,
         "location": cert.location,
         "comment": cert.comment,
-        "evaluator_name": (
-            f"{evaluator.first_name} {evaluator.last_name}" if evaluator else None
-        ),
+        "evaluator_name": evaluator_name,
 
         "blocked": False,
         "expires_at": expires_at,
         "confirm_hash": _hmac(hash_payload),
         "confirm_text_required": f"DELETE CERTIFICATE {certification_id}",
     }
-
 
 @router.post("/certificates/{certification_id}/hard-delete")
 def hard_delete_certificate(

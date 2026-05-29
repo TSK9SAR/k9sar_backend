@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Response
+from fastapi.responses import FileResponse
 from PIL import Image, ImageOps
 from sqlalchemy.orm import Session
 from sqlalchemy import select, text 
@@ -14,18 +16,6 @@ from app.utils.auth import get_current_user, require_mfa_verified, is_evaluator,
 from app.utils.authz import has_role_db
 from app.models.user import User
 import logging, os
-
-
-router = APIRouter(prefix="/api/me", tags=["signature"])
-
-SIGNATURE_DIR = "/var/www/k9sar_signatures"  # must match nginx alias folder
-MAX_BYTES = 5 * 1024 * 1024  # 5MB
-
-
-def sha256_bytes(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
-
-
 import hashlib
 import logging
 import os
@@ -40,10 +30,14 @@ from app.database import get_db
 from app.utils.auth import get_current_user, require_mfa_verified
 from app.models.user import User  # IMPORTANT: ORM model
 
-router = APIRouter(prefix="/api/me", tags=["signature"])
+router = APIRouter(prefix="/api", tags=["signature"])
 
-SIGNATURE_DIR = "/var/www/k9sar_signatures"
+SIGNATURE_DIR = "/var/www/k9sar_signatures"  # must match nginx alias folder
 MAX_BYTES = 5 * 1024 * 1024  # 5MB
+
+
+def sha256_bytes(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()
 
 log = logging.getLogger("k9sar")
 
@@ -127,7 +121,7 @@ def crop_signature(im: Image.Image) -> Image.Image:
 
     return im.crop((x_min, y_min, x_max + 1, y_max + 1))
 
-@router.post("/signature")
+@router.post("/me/signature")
 def upload_my_signature(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
@@ -192,25 +186,31 @@ def upload_my_signature(
     im = crop_signature(im)
     im.thumbnail((600, 220))
 
-    os.makedirs(SIGNATURE_DIR, exist_ok=True)
+    # os.makedirs(SIGNATURE_DIR, exist_ok=True)
+
+    # filename = f"user_{uid}.png"
+    # out_path = os.path.join(SIGNATURE_DIR, filename)
+
+    # buf = BytesIO()
+    # im.save(buf, format="PNG", optimize=True)
+    # png_bytes = buf.getvalue()
+
+    # # Write file
+    # try:
+    #     with open(out_path, "wb") as f:
+    #         f.write(png_bytes)
+    # except Exception as e:
+    #     raise HTTPException(status_code=500, detail=f"Failed to write signature file: {e}")
+
+    # # Verify write
+    # if not os.path.exists(out_path) or os.path.getsize(out_path) <= 0:
+    #     raise HTTPException(status_code=500, detail="Signature file write failed.")
 
     filename = f"user_{uid}.png"
-    out_path = os.path.join(SIGNATURE_DIR, filename)
 
     buf = BytesIO()
     im.save(buf, format="PNG", optimize=True)
     png_bytes = buf.getvalue()
-
-    # Write file
-    try:
-        with open(out_path, "wb") as f:
-            f.write(png_bytes)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to write signature file: {e}")
-
-    # Verify write
-    if not os.path.exists(out_path) or os.path.getsize(out_path) <= 0:
-        raise HTTPException(status_code=500, detail="Signature file write failed.")
 
     sig_hash = sha256_bytes(png_bytes)
     sig_url = f"/signatures/{filename}"
@@ -222,10 +222,39 @@ def upload_my_signature(
     user.signature_hash = sig_hash
     user.signature_updated_at = now_utc_naive
 
+    # Store current signature in DB too.
+    # Keep the filesystem write for now to avoid changing existing behavior.
+    db.execute(
+        text("""
+            UPDATE user_signatures
+            SET is_active = 0
+            WHERE user_id = :uid
+            AND is_active = 1
+        """),
+        {"uid": uid},
+    )
+
+    db.execute(
+        text("""
+            INSERT INTO user_signatures
+                (user_id, mime_type, image_data, sha256_hash, source_filename, uploaded_at, is_active)
+            VALUES
+                (:uid, 'image/png', :image_data, :sha256_hash, :source_filename, :uploaded_at, 1)
+        """),
+        {
+            "uid": uid,
+            "image_data": png_bytes,
+            "sha256_hash": sig_hash,
+            "source_filename": filename,
+            "uploaded_at": now_utc_naive,
+        },
+    )
+
     db.commit()
     db.refresh(user)
 
-    log.info("signature updated user_id=%s path=%s size=%s", uid, out_path, os.path.getsize(out_path))
+    # log.info("signature updated user_id=%s path=%s size=%s", uid, out_path, os.path.getsize(out_path))
+    log.info("signature updated user_id=%s db_bytes=%s", uid, len(png_bytes))
 
     return {
         "signature_url": user.signature_url,
@@ -234,7 +263,7 @@ def upload_my_signature(
     }
 
 
-@router.get("/signature")
+@router.get("/me/signature")
 def get_my_signature(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
@@ -249,7 +278,7 @@ def get_my_signature(
 
 
 
-@router.get("/signature/capabilities")
+@router.get("/me/signature/capabilities")
 def signature_capabilities(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -291,3 +320,67 @@ def signature_capabilities(
         "mfa_enabled": mfa_enabled,
         "mfa_verified": mfa_verified,
     }
+
+
+@router.get("/signatures/{filename}")
+def serve_signature(filename: str, db: Session = Depends(get_db)):
+    match = re.match(r"^user_(\d+)\.png$", filename, re.IGNORECASE)
+    if not match:
+        raise HTTPException(status_code=404, detail="Signature not found")
+
+    user_id = int(match.group(1))
+
+    row = db.execute(
+        text("""
+            SELECT mime_type, image_data
+            FROM user_signatures
+            WHERE user_id = :user_id
+              AND is_active = 1
+            ORDER BY signature_id DESC
+            LIMIT 1
+        """),
+        {"user_id": user_id},
+    ).first()
+
+    if row and row.image_data:
+        return Response(
+            content=row.image_data,
+            media_type=row.mime_type or "image/png",
+        )
+
+    # Fallback to legacy file
+    path = os.path.join(SIGNATURE_DIR, filename)
+    if os.path.exists(path):
+        return FileResponse(path, media_type="image/png")
+
+    raise HTTPException(status_code=404, detail="Signature not found")
+
+@router.get("/certificate-signatures/{certification_id}/{role}.png")
+def serve_certificate_signature(
+    certification_id: int,
+    role: str,
+    db: Session = Depends(get_db),
+):
+    if role not in ("supervisor", "co_evaluator"):
+        raise HTTPException(status_code=404, detail="Signature not found")
+
+    row = db.execute(
+        text("""
+            SELECT mime_type, image_data
+            FROM certificate_signatures
+            WHERE certification_id = :certification_id
+              AND role = :role
+            ORDER BY cert_signature_id DESC
+            LIMIT 1
+        """),
+        {"certification_id": certification_id, "role": role},
+    ).mappings().first()
+
+    if not row or not row["image_data"]:
+        raise HTTPException(status_code=404, detail="Signature not found")
+
+    return Response(
+        content=row["image_data"],
+        media_type=row["mime_type"] or "image/png",
+    )
+

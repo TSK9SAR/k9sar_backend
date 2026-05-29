@@ -6,7 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session, aliased
-from sqlalchemy import case
+from sqlalchemy import case, text
 
 from app.database import get_db
 from app.models import Certification, Team, Handler, Dog, Standard, Discipline, User
@@ -198,6 +198,81 @@ def compute_default_expiration(*, date_awarded, evaluation_complete: bool, stand
         )
     return date_awarded + timedelta(days=incomplete_days)
 
+def snapshot_certificate_signature(
+    db: Session,
+    *,
+    certification_id: int,
+    role: str,
+    signer_user_id: int,
+    signer_name: str | None,
+):
+    row = db.execute(
+        text("""
+            SELECT signature_id, mime_type, image_data, sha256_hash
+            FROM user_signatures
+            WHERE user_id = :user_id
+              AND is_active = 1
+            ORDER BY signature_id DESC
+            LIMIT 1
+        """),
+        {"user_id": signer_user_id},
+    ).mappings().first()
+
+    if not row:
+        return
+
+    db.execute(
+        text("""
+            DELETE FROM certificate_signatures
+            WHERE certification_id = :certification_id
+              AND role = :role
+        """),
+        {
+            "certification_id": certification_id,
+            "role": role,
+        },
+    )
+
+    db.execute(
+        text("""
+            INSERT INTO certificate_signatures
+                (
+                    certification_id,
+                    role,
+                    signer_user_id,
+                    signer_name,
+                    mime_type,
+                    image_data,
+                    sha256_hash,
+                    signed_at,
+                    source_signature_id
+                )
+            VALUES
+                (
+                    :certification_id,
+                    :role,
+                    :signer_user_id,
+                    :signer_name,
+                    :mime_type,
+                    :image_data,
+                    :sha256_hash,
+                    :signed_at,
+                    :source_signature_id
+                )
+        """),
+        {
+            "certification_id": certification_id,
+            "role": role,
+            "signer_user_id": signer_user_id,
+            "signer_name": signer_name,
+            "mime_type": row["mime_type"] or "image/png",
+            "image_data": row["image_data"],
+            "sha256_hash": row["sha256_hash"],
+            "signed_at": datetime.utcnow(),
+            "source_signature_id": row["signature_id"],
+        },
+    )
+
 # ------------------------------------------------------------
 # Matrix
 # ------------------------------------------------------------
@@ -301,6 +376,14 @@ def issue_certification(
     cert.signature_hash = signer.signature_hash
     cert.signature_updated_at = signer.signature_updated_at  # UTC-naive in your DB
 
+    snapshot_certificate_signature(
+        db,
+        certification_id=cert.certification_id,
+        role="supervisor",
+        signer_user_id=current_user.user_id,
+        signer_name=_full_name(current_user),
+    )
+
     # log.warning("ISSUE CERT: signer=%s sig_url=%s", current_user.user_id, cert.signature_url)
 
     # Optional guard: if you want to REQUIRE signature to issue
@@ -337,8 +420,10 @@ def issue_certification(
 # Update pending (PATCH existing pending cert only)
 # ------------------------------------------------------------
 
+
 def status_str(x) -> str:
     return (getattr(x, "value", x) or "").strip().lower()
+
 
 @router.patch("/{certification_id}", response_model=CertificationOut)
 def update_or_finalize_pending_certification(
@@ -367,20 +452,31 @@ def update_or_finalize_pending_certification(
     old_location = cert.location
     old_comment = cert.comment
 
-    # Desired status: default stays pending unless explicitly finalizing
-    desired_status = status_str(getattr(payload, "status", None)) or "pending"
+    if payload.evaluation_complete is not None:
+        cert.evaluation_complete = payload.evaluation_complete
+
+    if payload.requires_co_evaluator is not None:
+        cert.requires_co_evaluator = payload.requires_co_evaluator
+
+    if cert.requires_co_evaluator:
+        desired_status = "pending"
+    elif cert.evaluation_complete:
+        desired_status = "active"
+    else:
+        desired_status = "incomplete"
+
     if cert.requires_co_evaluator and desired_status in ("active", "incomplete"):
         raise HTTPException(
             status_code=422,
             detail="This certification requires co-evaluator approval.",
         )
+
     if desired_status not in ("pending", "incomplete", "active"):
         raise HTTPException(
             status_code=422,
             detail="Pending or incomplete certifications may only remain pending, remain incomplete, or be finalized to active.",
-       )
+        )
 
-    # Apply patch fields (never touch team_id/standard_id here)
     if getattr(payload, "date_awarded", None) is not None:
         cert.date_awarded = payload.date_awarded
 
@@ -393,10 +489,6 @@ def update_or_finalize_pending_certification(
     if hasattr(payload, "comment") and payload.comment is not None:
         cert.comment = payload.comment
 
-    if payload.evaluation_complete is not None:
-        cert.evaluation_complete = payload.evaluation_complete
-
-    # Keep the evaluator who is editing/finalizing
     cert.supervisor_id = current_user.user_id
     cert.last_actor_user_id = current_user.user_id
 
@@ -406,29 +498,37 @@ def update_or_finalize_pending_certification(
             detail="A saved signature is required before updating a certification",
         )
 
-    cert.signature_url = current_user.signature_url
-    cert.signature_hash = current_user.signature_hash
-    cert.signature_updated_at = current_user.signature_updated_at
+    signer = db.query(User).filter(User.user_id == current_user.user_id).one()
+    cert.signature_url = signer.signature_url
+    cert.signature_hash = signer.signature_hash
+    cert.signature_updated_at = signer.signature_updated_at
 
-    # Common requirements
+    snapshot_certificate_signature(
+        db,
+        certification_id=cert.certification_id,
+        role="supervisor",
+        signer_user_id=current_user.user_id,
+        signer_name=_full_name(current_user),
+    )
+
     if cert.date_awarded is None:
         raise HTTPException(status_code=422, detail="date_awarded is required.")
+
     if cert.expires_at is None:
         raise HTTPException(status_code=422, detail="expires_at is required.")
 
-
-    # Incomplete resting state (only valid when co-evaluator is NOT required)
     if desired_status == "incomplete":
         if cert.requires_co_evaluator:
             raise HTTPException(
                 status_code=422,
                 detail="This certification requires co-evaluator approval and cannot be set to incomplete directly.",
             )
+
         if not (cert.comment and cert.comment.strip()):
             raise HTTPException(status_code=422, detail="Incomplete certifications require a comment.")
-        
+
         if not (cert.location and cert.location.strip()):
-            raise HTTPException(status_code=422, detail=" location is required.")
+            raise HTTPException(status_code=422, detail="Location is required.")
 
         cert.status = "incomplete"
 
@@ -458,9 +558,15 @@ def update_or_finalize_pending_certification(
         db.refresh(cert)
         return cert
 
-    # If co-evaluator is required, primary submissions always return to pending
     if cert.requires_co_evaluator:
         cert.status = "pending"
+
+        cert.co_evaluator_user_id = None
+        cert.co_evaluated_at = None
+        cert.co_signature_url = None
+        cert.co_signature_hash = None
+        cert.co_signature_updated_at = None
+
         log_cert_event(
             db,
             cert=cert,
@@ -482,40 +588,17 @@ def update_or_finalize_pending_certification(
             expires_at_before=None,
             expires_at_after=None,
         )
-        # reset prior co-evaluation cycle
-        cert.co_evaluator_user_id = None
-        cert.co_evaluated_at = None
-        # cert.co_evaluator_note = None
-        cert.co_signature_url = None
-        cert.co_signature_hash = None
-        cert.co_signature_updated_at = None
 
         db.commit()
         db.refresh(cert)
         return cert
-    # ---- Finalize to ACTIVE ----
-    # If you want to still require a comment on finalization, keep this; otherwise remove it.
-    # if not (cert.comment and cert.comment.strip()):
-    #     raise HTTPException(status_code=422, detail="A comment is required to finalize a certification.")
 
     cert.status = "active" if cert.evaluation_complete else "incomplete"
-
-    # Decide what "issued_at" means in your system:
-    # - if you want it to represent finalization time, set it now
     cert.issued_at = datetime.utcnow().replace(microsecond=0)
-
-    # Seal/sign only when active
     cert.seal_version = 2
 
-    # Must flush before computing hash if hash uses certification_id
     db.flush()
-
     cert.seal_hash = compute_seal_hash(cert=cert)
-
-    signer = db.query(User).filter(User.user_id == current_user.user_id).one()
-    cert.signature_url = signer.signature_url
-    cert.signature_hash = signer.signature_hash
-    cert.signature_updated_at = signer.signature_updated_at  # keep your existing timezone handling
 
     log_cert_event(
         db,
@@ -543,6 +626,7 @@ def update_or_finalize_pending_certification(
     db.refresh(cert)
     return cert
 
+
 @router.post("/{cert_id}/co-evaluate", response_model=CertificationOut)
 def co_evaluate(
     cert_id: int,
@@ -557,12 +641,12 @@ def co_evaluate(
         .first()
     )
 
+    if not cert:
+        raise HTTPException(status_code=404, detail="Certification not found")
+
     old_status = status_str(cert.status)
     old_eval_complete = cert.evaluation_complete
     old_requires_co = bool(cert.requires_co_evaluator)
-
-    if not cert:
-        raise HTTPException(status_code=404, detail="Certification not found")
 
     if status_str(cert.status) != "pending" or not cert.requires_co_evaluator:
         raise HTTPException(status_code=400, detail="Not pending co-evaluation")
@@ -592,6 +676,14 @@ def co_evaluate(
         cert.co_signature_url = current_user.signature_url
         cert.co_signature_hash = current_user.signature_hash
         cert.co_signature_updated_at = current_user.signature_updated_at
+
+        snapshot_certificate_signature(
+            db,
+            certification_id=cert.certification_id,
+            role="co_evaluator",
+            signer_user_id=current_user.user_id,
+            signer_name=_full_name(current_user),
+        )
     else:
         cert.status = "rejected"
 
@@ -623,10 +715,6 @@ def co_evaluate(
     db.refresh(cert)
     return cert
 
-# ------------------------------------------------------------
-# Revoke (modify existing row)
-# ------------------------------------------------------------
-@router.patch("/{certification_id}/revoke", response_model=CertificationOut)
 def revoke_certification(
     certification_id: int,
     payload: CertificationRevoke,
@@ -804,20 +892,30 @@ def correct_certification(
         raise HTTPException(status_code=404, detail="Certification not found")
 
     is_admin = user_has_role(current_user, "admin")
-    is_issuer = cert.issuer_user_id == current_user.user_id
+    # Only allow the original issuer to correct, and only if they are also the last actor (i.e. no one else has modified it since issuance)
+    is_issuer = cert.issuer_user_id == current_user.user_id and cert.issuer_user_id == cert.last_actor_user_id
     effective_status = _determine_status(cert)
-    is_expired_or_revoked = effective_status in {"expired", "revoked", "expiring"}
+    is_expired_or_revoked = effective_status in {"expired", "revoked", "rejected"}
 
-    if not (is_admin or is_issuer or is_expired_or_revoked):
+    if is_expired_or_revoked:
         raise HTTPException(
             status_code=403,
-            detail="Only the original issuer, an admin can update a certfication that is not expired/expiring or revoked",
+            detail="Expired, expiring, or revoked certifications cannot be corrected.",
         )
 
+    if not (is_admin or is_issuer):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the original issuer or an admin can correct this certification.",
+        )
+    
     old_location = cert.location
     old_comment = cert.comment
     old_date_awarded = cert.date_awarded
     old_expires_at = cert.expires_at
+    old_eval_complete = cert.evaluation_complete
+    old_requires_co = bool(cert.requires_co_evaluator)
+    old_status = cert.status
 
     if payload.location is not None:
         new_location = payload.location.strip()
@@ -834,14 +932,29 @@ def correct_certification(
     if payload.expires_at is not None:
         cert.expires_at = payload.expires_at
 
+    if payload.evaluation_complete is not None:
+        cert.evaluation_complete = payload.evaluation_complete
+
+    if payload.requires_co_evaluator is not None:
+        cert.requires_co_evaluator = payload.requires_co_evaluator
+
     if cert.date_awarded and cert.expires_at and cert.expires_at < cert.date_awarded:
         raise HTTPException(status_code=400, detail="Expiration cannot be before award date")
+    
+    if not cert.evaluation_complete:
+        cert.status = "incomplete" 
+    elif cert.requires_co_evaluator:
+        cert.status = "pending"
+    else:
+        cert.status = "active"
 
     changed = (
         cert.location != old_location
         or cert.comment != old_comment
         or cert.date_awarded != old_date_awarded
         or cert.expires_at != old_expires_at
+        or cert.evaluation_complete != old_eval_complete
+        or cert.requires_co_evaluator != old_requires_co
     )
     if not changed:
         raise HTTPException(status_code=400, detail="No changes detected")
@@ -851,11 +964,11 @@ def correct_certification(
         cert=cert,
         event_type="correction",
         actor_user_id=current_user.user_id,
-        previous_status=cert.status,
+        previous_status=old_status,
         new_status=cert.status,
-        evaluation_complete_before=cert.evaluation_complete,
+        evaluation_complete_before=old_eval_complete,
         evaluation_complete_after=cert.evaluation_complete,
-        requires_co_evaluator_before=cert.requires_co_evaluator,
+        requires_co_evaluator_before=old_requires_co,
         requires_co_evaluator_after=cert.requires_co_evaluator,
         location_before=old_location,
         location_after=cert.location,
@@ -939,6 +1052,40 @@ def get_certificate_view(
 
     seal_sc = short_code(cert.seal_hash) if getattr(cert, "seal_hash", None) else None
 
+    supervisor_snapshot_exists = db.execute(
+        text("""
+            SELECT 1
+            FROM certificate_signatures
+            WHERE certification_id = :certification_id
+            AND role = 'supervisor'
+            LIMIT 1
+        """),
+        {"certification_id": cert.certification_id},
+    ).first() is not None
+
+    co_snapshot_exists = db.execute(
+        text("""
+            SELECT 1
+            FROM certificate_signatures
+            WHERE certification_id = :certification_id
+            AND role = 'co_evaluator'
+            LIMIT 1
+        """),
+        {"certification_id": cert.certification_id},
+    ).first() is not None
+
+    supervisor_signature_url = (
+        f"/api/certificate-signatures/{cert.certification_id}/supervisor.png"
+        if supervisor_snapshot_exists
+        else getattr(cert, "signature_url", None)
+    )
+
+    co_signature_url = (
+        f"/api/certificate-signatures/{cert.certification_id}/co_evaluator.png"
+        if co_snapshot_exists
+        else getattr(cert, "co_signature_url", None)
+    )
+
     return CertificateView(
         certification_id=cert.certification_id,
         handler_name=_full_name(handler_user),
@@ -965,18 +1112,18 @@ def get_certificate_view(
 
         issued_at=getattr(cert, "issued_at", None),
 
-        # Primary signature snapshot
-        supervisor_signature_url=getattr(cert, "signature_url", None),
-        supervisor_signature_hash=getattr(cert, "signature_hash", None),
-        supervisor_signature_updated_at=getattr(cert, "signature_updated_at", None),
-
         # Co-evaluator info
         co_evaluator_user_id=getattr(cert, "co_evaluator_user_id", None),
         co_evaluator_name=_full_name(co_evaluator),
         co_evaluated_at=getattr(cert, "co_evaluated_at", None),
+        
+        # Primary signature snapshot
+        supervisor_signature_url=supervisor_signature_url,
+        supervisor_signature_hash=getattr(cert, "signature_hash", None),
+        supervisor_signature_updated_at=getattr(cert, "signature_updated_at", None),
 
         # Co-evaluator signature snapshot
-        co_signature_url=getattr(cert, "co_signature_url", None),
+        co_signature_url=co_signature_url,
         co_signature_hash=getattr(cert, "co_signature_hash", None),
         co_signature_updated_at=getattr(cert, "co_signature_updated_at", None),
 

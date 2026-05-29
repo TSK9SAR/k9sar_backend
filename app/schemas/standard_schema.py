@@ -1,6 +1,7 @@
 from datetime import date, datetime
 from typing import Optional, Any
 from pydantic import BaseModel, field_validator
+from app.models.standard import MultipartRequirementMode
 
 def parse_date_flexible(v: Any) -> Optional[date]:
     if v is None or v == "":
@@ -43,7 +44,7 @@ class StandardCreate(BaseModel):
     effective_date: date
     incomplete_days: int | None = None  # days the incomplete status remains.
     effective_days: int | None = None  # days the standard is effective after the effective_date.
-
+    multipart_requirement_mode: MultipartRequirementMode
     @field_validator("effective_date", mode="before")
     @classmethod
     def _parse_implementation_date(cls, v):
@@ -58,7 +59,7 @@ class StandardUpdate(BaseModel):
     effective_date: date | None = None
     incomplete_days: int | None = None  # days the incomplete status remains.
     effective_days: int | None = None  # days the standard is effective after the effective_date.
-
+    multipart_requirement_mode: MultipartRequirementMode
     @field_validator("effective_date", mode="before")
     @classmethod
     def _parse_implementation_date(cls, v):
@@ -78,7 +79,7 @@ class StandardOut(BaseModel):
     url: str | None = None
     incomplete_days: int | None = None
     effective_days: int | None = None
-
+    multipart_requirement_mode: MultipartRequirementMode
     discipline_name: str | None = None
     discipline_group_id: int | None = None
     discipline_group_name: str | None = None
@@ -96,6 +97,7 @@ class StandardPublicOut(BaseModel):
     effective_date: date
     incomplete_days: Optional[int] = None
     effective_days: Optional[int] = None
+    multipart_requirement_mode: MultipartRequirementMode
     # ✅ add these
     discipline_name: Optional[str] = None
     discipline_group_id: Optional[int] = None
@@ -114,6 +116,7 @@ class DisciplineWithLatestStandardOut(BaseModel):
     standard: Optional[StandardPublicOut] = None
     incomplete_days: Optional[int] = None
     effective_days: Optional[int] = None
+    multipart_requirement_mode: Optional[str] = None
 
     class Config:
         orm_mode = True

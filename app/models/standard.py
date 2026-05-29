@@ -1,11 +1,12 @@
 # app/models/standard.py
 from datetime import date
-from sqlalchemy import Column, Integer, String, ForeignKey, Date, Index, Text
+from sqlalchemy import Column, Enum, Integer, String, ForeignKey, Date, Index, Text
 from sqlalchemy.orm import relationship
 from app.database import Base
 
 from app.models.discipline import Discipline   # ← ADD THIS
-
+import enum
+from sqlalchemy import Enum as SQLEnum
 
 from datetime import date
 
@@ -61,6 +62,10 @@ def parse_date_flexible(v: Any) -> date | None:
 
     raise ValueError("Invalid date. Use YYYY-MM-DD or a common format like MM/DD/YYYY.")
 
+class MultipartRequirementMode(str, enum.Enum):
+    NEVER = "never"
+    ALWAYS = "always"
+    FIRST_CERT_ONLY = "first_cert_only"
 
 
 class Standard(Base):
@@ -80,6 +85,14 @@ class Standard(Base):
     url = Column(String(500), nullable=True)
     incomplete_days = Column(Integer, nullable=True, default=0)
     effective_days = Column(Integer, nullable=True, default=730)
+    multipart_requirement_mode = Column(
+        SQLEnum(
+            MultipartRequirementMode,
+            values_callable=lambda obj: [e.value for e in obj]
+        ),
+        nullable=False,
+        default=MultipartRequirementMode.NEVER,
+    )
     # renamed + defaults to today; NOT NULL
     effective_date = Column(Date, nullable=False, default=date.today)
 
