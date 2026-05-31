@@ -12,6 +12,9 @@ class AffiliationBase(BaseModel):
 
     sortorder: Optional[int] = None
     is_active: Optional[bool] = True
+    public_slug: Optional[str] = Field(None, max_length=50)
+    embed_title: Optional[str] = Field(None, max_length=120)
+    allow_public_embed: Optional[bool] = None;
 
 class AffiliationCreate(AffiliationBase):
     pass
@@ -25,6 +28,9 @@ class AffiliationUpdate(BaseModel):
     phone: Optional[str] = Field(None, max_length=50)
     location: Optional[str] = Field(None, max_length=120)
     url: Optional[str] = Field(None, max_length=255)
+    public_slug: Optional[str] = Field(None, max_length=50)
+    embed_title: Optional[str] = Field(None, max_length=120)
+    allow_public_embed: Optional[bool] = None;
 
     sortorder: Optional[int] = None
     is_active: Optional[bool] = None
@@ -43,6 +49,9 @@ class AffiliationDetailOut(BaseModel):
     url: Optional[str] = None
     sortorder: Optional[int] = None
     is_active: Optional[bool] = None
+    public_slug: Optional[str] = None
+    allow_public_embed: bool = False
+    embed_title: Optional[str] = None
 
 class AffiliationPublicOut(BaseModel):
     affiliation_id: int

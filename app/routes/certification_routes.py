@@ -357,7 +357,7 @@ def issue_certification(
         last_actor_user_id=current_user.user_id,
         issuer_user_id=current_user.user_id,
         issued_at=issued_at,
-        seal_version=2,
+        seal_version=3,
         signature_url=current_user.signature_url,
         signature_hash=current_user.signature_hash,
         signature_updated_at=current_user.signature_updated_at,
@@ -367,7 +367,7 @@ def issue_certification(
     db.flush()  # ensure certification_id exists
     # OPTIONAL but nice: db.refresh(cert) to ensure DB-normalized values are used
     # db.refresh(cert)
-    cert.seal_hash = compute_seal_hash(cert=cert)
+    # cert.seal_hash = compute_seal_hash(cert=cert)
     # Freeze signer signature onto this certification (so it never changes later)
     signer = db.query(User).filter(User.user_id == current_user.user_id).one()
 
@@ -383,6 +383,9 @@ def issue_certification(
         signer_user_id=current_user.user_id,
         signer_name=_full_name(current_user),
     )
+
+    cert.seal_version = 3
+    cert.seal_hash = compute_seal_hash(cert=cert, db=db)
 
     # log.warning("ISSUE CERT: signer=%s sig_url=%s", current_user.user_id, cert.signature_url)
 
@@ -595,10 +598,10 @@ def update_or_finalize_pending_certification(
 
     cert.status = "active" if cert.evaluation_complete else "incomplete"
     cert.issued_at = datetime.utcnow().replace(microsecond=0)
-    cert.seal_version = 2
+    cert.seal_version = 3
 
     db.flush()
-    cert.seal_hash = compute_seal_hash(cert=cert)
+    cert.seal_hash = compute_seal_hash(cert=cert, db=db)
 
     log_cert_event(
         db,
@@ -684,6 +687,8 @@ def co_evaluate(
             signer_user_id=current_user.user_id,
             signer_name=_full_name(current_user),
         )
+        cert.seal_version = 3
+        cert.seal_hash = compute_seal_hash(cert=cert, db=db)
     else:
         cert.status = "rejected"
 
@@ -715,6 +720,7 @@ def co_evaluate(
     db.refresh(cert)
     return cert
 
+@router.patch("/{certification_id}/revoke", response_model=CertificationOut)
 def revoke_certification(
     certification_id: int,
     payload: CertificationRevoke,
@@ -900,7 +906,7 @@ def correct_certification(
     if is_expired_or_revoked:
         raise HTTPException(
             status_code=403,
-            detail="Expired, expiring, or revoked certifications cannot be corrected.",
+            detail="Expired, Rejected, or Revoked certifications cannot be corrected.",
         )
 
     if not (is_admin or is_issuer):
@@ -1145,7 +1151,7 @@ def verify_cert(cert_id: int, db: Session = Depends(get_db)):
     if not stored:
         integrity = "UNSEALED"
     else:
-        computed = compute_seal_hash(cert=cert)   # ← version-aware function
+        computed = compute_seal_hash(cert=cert, db=db)  # ← version-aware function
         integrity = "VALID" if computed == stored else "TAMPERED"
 
     newer = (

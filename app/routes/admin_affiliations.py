@@ -144,6 +144,9 @@ def create_affiliation(
         phone=_trim_or_none(payload.phone),
         location=_trim_or_none(payload.location),
         url=_trim_or_none(payload.url),
+        public_slug=_trim_or_none(payload.public_slug),
+        embed_title=_trim_or_none(payload.embed_title),
+        allow_public_embed=payload.allow_public_embed,
         sortorder=payload.sortorder,
         is_active=True if payload.is_active is None else bool(payload.is_active),
     )
@@ -200,7 +203,12 @@ def update_affiliation(
         a.location = _trim_or_none(payload.location)
     if payload.url is not None:
         a.url = _trim_or_none(payload.url)
-
+    if payload.public_slug is not None:
+        a.public_slug = _trim_or_none(payload.public_slug)
+    if payload.embed_title is not None:
+        a.embed_title = _trim_or_none(payload.embed_title)
+    if payload.allow_public_embed is not None:
+        a.allow_public_embed = payload.allow_public_embed
     if payload.sortorder is not None:
         a.sortorder = payload.sortorder
     if payload.is_active is not None:

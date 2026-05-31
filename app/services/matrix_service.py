@@ -264,12 +264,6 @@ def build_certification_matrix(db: Session, current_user: User, affiliation_id: 
             func.max(Certification.certification_id).label("certification_id"),
         )
         .filter(Certification.team_id.in_(team_ids))
-        .filter(
-            or_(
-                Certification.expires_at.is_(None),
-                Certification.expires_at >= today,
-            )
-        )
         .filter(Certification.status != "revoked")
         .group_by(Certification.team_id, Certification.standard_id)
         .subquery()

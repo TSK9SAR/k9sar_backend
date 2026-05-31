@@ -42,6 +42,10 @@ class Affiliation(Base):
     location = Column(String(120), nullable=True)
     url = Column(String(255), nullable=True)
 
+    public_slug = Column(String(80), unique=True, nullable=True)
+    allow_public_embed = Column(Boolean, nullable=False, default=False)
+    embed_title = Column(String(255), nullable=True)
+
     sortorder = Column(Integer, nullable=True)
     is_active = Column(Boolean, nullable=False, server_default="1")
 

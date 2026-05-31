@@ -48,6 +48,7 @@ from app.routes import forum
 from app.routes import admin_email_campaigns
 from app.routes.help import router as help_router, admin_router as admin_help_router
 from app.routes import admin_forum_surveys
+from app.routes import public_embeds
 
 #============================================================
 # FastAPI app initialization
@@ -169,6 +170,8 @@ app.include_router(admin_email_campaigns.router, prefix="/api")
 app.include_router(help_router, prefix="/api")
 app.include_router(admin_help_router, prefix="/api")
 app.include_router(admin_forum_surveys.router, prefix="/api")
+app.include_router(public_embeds.router, prefix="/api")  # <-- from public_embeds.py
+
 
 
 import inspect

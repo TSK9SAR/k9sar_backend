@@ -27,7 +27,7 @@ def public_verify_page(cert_id: int, db: Session = Depends(get_db)):
     if not stored:
         integrity = "UNSEALED"
     else:
-        computed = compute_seal_hash(cert=cert)
+        computed = compute_seal_hash(cert=cert, db=db)  # ← version-aware function
         integrity = "VALID" if computed == stored else "TAMPERED"
 
     standing = standing_for(cert)
