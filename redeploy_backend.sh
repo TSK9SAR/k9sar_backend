@@ -1,4 +1,3 @@
-#!/usr/bin/env bash
 set -euo pipefail
 
 APP_DIR="$HOME/k9sar_backend"
@@ -7,7 +6,7 @@ IMAGE_NAME="k9sar_backend:latest"
 ENV_FILE="$APP_DIR/backend.env"
 
 UPLOADS_HOST_DIR="/var/k9sar/uploads"
-SIGNATURES_HOST_DIR="/var/www/k9sar_signatures"
+STATIC_IMAGES_HOST_DIR="$APP_DIR/static/images"
 
 PORT_HOST="8000"
 PORT_CONTAINER="8000"
@@ -18,7 +17,7 @@ echo "    Container:      $CONTAINER_NAME"
 echo "    Image:          $IMAGE_NAME"
 echo "    Env file:       $ENV_FILE"
 echo "    Uploads mount:  $UPLOADS_HOST_DIR -> /app/uploads"
-echo "    Signatures:     $SIGNATURES_HOST_DIR -> /var/www/k9sar_signatures"
+echo "    Static images:  $STATIC_IMAGES_HOST_DIR -> /app/static/images"
 echo ""
 
 # ---- Preconditions ----
@@ -33,7 +32,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
 fi
 
 # Ensure host mount dirs exist
-sudo mkdir -p "$UPLOADS_HOST_DIR" "$SIGNATURES_HOST_DIR"
+sudo mkdir -p "$UPLOADS_HOST_DIR" "$STATIC_IMAGES_HOST_DIR"
 
 cd "$APP_DIR"
 
@@ -56,7 +55,7 @@ sudo docker run -d \
   --env-file "$ENV_FILE" \
   -p "${PORT_HOST}:${PORT_CONTAINER}" \
   -v "${UPLOADS_HOST_DIR}:/app/uploads" \
-  -v "${SIGNATURES_HOST_DIR}:/var/www/k9sar_signatures" \
+  -v "${STATIC_IMAGES_HOST_DIR}:/app/static/images:ro" \
   "$IMAGE_NAME"
 
 # ---- Verify ----
@@ -70,3 +69,4 @@ sudo docker logs --tail 60 "$CONTAINER_NAME"
 
 echo ""
 echo "==> Done."
+

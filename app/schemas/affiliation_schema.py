@@ -15,6 +15,7 @@ class AffiliationBase(BaseModel):
     public_slug: Optional[str] = Field(None, max_length=50)
     embed_title: Optional[str] = Field(None, max_length=120)
     allow_public_embed: Optional[bool] = None;
+    id_card_text_theme: Optional[str] = "light"
 
 class AffiliationCreate(AffiliationBase):
     pass
@@ -31,6 +32,7 @@ class AffiliationUpdate(BaseModel):
     public_slug: Optional[str] = Field(None, max_length=50)
     embed_title: Optional[str] = Field(None, max_length=120)
     allow_public_embed: Optional[bool] = None;
+    id_card_text_theme: Optional[str] = "light"
 
     sortorder: Optional[int] = None
     is_active: Optional[bool] = None
@@ -52,6 +54,7 @@ class AffiliationDetailOut(BaseModel):
     public_slug: Optional[str] = None
     allow_public_embed: bool = False
     embed_title: Optional[str] = None
+    id_card_text_theme: Optional[str] = "light"
 
 class AffiliationPublicOut(BaseModel):
     affiliation_id: int

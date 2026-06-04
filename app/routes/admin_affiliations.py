@@ -1,11 +1,11 @@
 from typing import Optional, List
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy.orm import Session
-
+from datetime import datetime, timezone
 from app.database import get_db
 from app.utils.auth import get_current_user, require_mfa_verified, require_admin
-
+from fastapi.responses import Response
 from app.models.handler import Affiliation, Handler
 from app.schemas.affiliation_schema import (
     AffiliationCreate,
@@ -214,6 +214,11 @@ def update_affiliation(
     if payload.is_active is not None:
         a.is_active = bool(payload.is_active)
 
+    if payload.id_card_text_theme is not None:
+        if payload.id_card_text_theme not in {"light", "dark"}:
+            raise HTTPException(status_code=422, detail="Invalid ID card text theme")
+        a.id_card_text_theme = payload.id_card_text_theme
+
     db.commit()
     db.refresh(a)
     return a
@@ -238,3 +243,110 @@ def delete_affiliation(
     db.delete(a)
     db.commit()
     return {"ok": True}
+
+
+ALLOWED_ID_CARD_BACKGROUND_TYPES = {
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+}
+
+MAX_ID_CARD_BACKGROUND_BYTES = 5 * 1024 * 1024  # 5 MB
+
+
+@router.get("/{affiliation_id}/id-card-background")
+def get_affiliation_id_card_background(
+    affiliation_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_admin),
+):
+    affiliation = (
+        db.query(Affiliation)
+        .filter(Affiliation.affiliation_id == affiliation_id)
+        .first()
+    )
+
+    if not affiliation:
+        raise HTTPException(status_code=404, detail="Affiliation not found")
+
+    if not affiliation.id_card_background_png:
+        raise HTTPException(status_code=404, detail="No ID card background uploaded")
+
+    return Response(
+        content=affiliation.id_card_background_png,
+        media_type=affiliation.id_card_background_mime or "image/png",
+        headers={
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@router.post("/{affiliation_id}/id-card-background")
+async def upload_affiliation_id_card_background(
+    affiliation_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user=Depends(require_admin),
+):
+    affiliation = (
+        db.query(Affiliation)
+        .filter(Affiliation.affiliation_id == affiliation_id)
+        .first()
+    )
+
+    if not affiliation:
+        raise HTTPException(status_code=404, detail="Affiliation not found")
+
+    if file.content_type not in ALLOWED_ID_CARD_BACKGROUND_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="Only PNG, JPEG, or WEBP images are allowed",
+        )
+
+    data = await file.read()
+
+    if len(data) > MAX_ID_CARD_BACKGROUND_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail="Image is too large. Maximum size is 5 MB.",
+        )
+
+    affiliation.id_card_background_png = data
+    affiliation.id_card_background_mime = file.content_type
+    affiliation.id_card_background_updated_at = datetime.now(timezone.utc)
+
+    db.commit()
+
+    return {
+        "ok": True,
+        "affiliation_id": affiliation.affiliation_id,
+        "mime": affiliation.id_card_background_mime,
+        "size": len(data),
+    }
+
+
+@router.delete("/{affiliation_id}/id-card-background")
+def delete_affiliation_id_card_background(
+    affiliation_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_admin),
+):
+    affiliation = (
+        db.query(Affiliation)
+        .filter(Affiliation.affiliation_id == affiliation_id)
+        .first()
+    )
+
+    if not affiliation:
+        raise HTTPException(status_code=404, detail="Affiliation not found")
+
+    affiliation.id_card_background_png = None
+    affiliation.id_card_background_mime = None
+    affiliation.id_card_background_updated_at = None
+
+    db.commit()
+
+    return {
+        "ok": True,
+        "affiliation_id": affiliation.affiliation_id,
+    }

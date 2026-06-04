@@ -1,6 +1,7 @@
 # app/models/handler.py
 from sqlalchemy import Column, Integer, String, Boolean, Text, func, DateTime, ForeignKey, Numeric, UniqueConstraint, Date
 from sqlalchemy.orm import relationship
+from sqlalchemy import LargeBinary
 from app.database import Base
 
 class Handler(Base):
@@ -46,6 +47,11 @@ class Affiliation(Base):
     allow_public_embed = Column(Boolean, nullable=False, default=False)
     embed_title = Column(String(255), nullable=True)
 
+    id_card_background_png = Column(LargeBinary, nullable=True)
+    id_card_background_mime = Column(String(100), nullable=True)
+    id_card_background_updated_at = Column(DateTime, nullable=True)
+    id_card_text_theme = Column(String(20), nullable=False, default="light")
+    
     sortorder = Column(Integer, nullable=True)
     is_active = Column(Boolean, nullable=False, server_default="1")
 
