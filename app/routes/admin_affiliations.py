@@ -287,6 +287,7 @@ async def upload_affiliation_id_card_background(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user=Depends(require_admin),
+    _mfa=Depends(require_mfa_verified),
 ):
     affiliation = (
         db.query(Affiliation)
@@ -330,6 +331,7 @@ def delete_affiliation_id_card_background(
     affiliation_id: int,
     db: Session = Depends(get_db),
     current_user=Depends(require_admin),
+    _mfa=Depends(require_mfa_verified),
 ):
     affiliation = (
         db.query(Affiliation)
