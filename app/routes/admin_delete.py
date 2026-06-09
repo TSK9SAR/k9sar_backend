@@ -924,6 +924,21 @@ def preview_delete_user_tree(
         {"uid": user_id},
     ).scalar() or 0
 
+    email_campaign_recipient_count = db.execute(
+        text("SELECT COUNT(*) FROM email_campaign_recipients WHERE user_id = :uid"),
+        {"uid": user_id},
+    ).scalar() or 0
+
+    webauthn_credential_count = db.execute(
+        text("SELECT COUNT(*) FROM webauthn_credentials WHERE user_id = :uid"),
+        {"uid": user_id},
+    ).scalar() or 0
+
+    auth_event_count = db.execute(
+        text("SELECT COUNT(*) FROM auth_events WHERE user_id = :uid"),
+        {"uid": user_id},
+    ).scalar() or 0
+
     password_reset_count = db.query(PasswordReset).filter(PasswordReset.user_id == user_id).count()
     invite_count = db.query(UserInvite).filter(UserInvite.user_id == user_id).count()
 
@@ -975,6 +990,9 @@ def preview_delete_user_tree(
         "forum_ballot_feedback_count": forum_ballot_feedback_count,
         "forum_ballot_vote_count": forum_ballot_vote_count,
         "forum_topic_read_count": forum_topic_read_count,
+        "email_campaign_recipient_count": email_campaign_recipient_count,
+        "webauthn_credential_count": webauthn_credential_count,
+        "auth_event_count": auth_event_count, 
     }
 
     label = f"{getattr(user, 'first_name', '') or ''} {getattr(user, 'last_name', '') or ''}".strip()
@@ -1021,6 +1039,9 @@ def preview_delete_user_tree(
             "forum_ballot_feedback": db.query(ForumBallotFeedback)
                 .filter(ForumBallotFeedback.user_id == user_id)
                 .count(),
+            "email_campaign_recipients": email_campaign_recipient_count,
+            "webauthn_credentials": webauthn_credential_count,
+            "auth_events": auth_event_count,
         },
         "will_preserve": {
             "forum_topics": int(forum_topic_count),
@@ -1151,6 +1172,21 @@ def hard_delete_user_tree(
         .count()
     )
 
+    email_campaign_recipient_count = db.execute(
+        text("SELECT COUNT(*) FROM email_campaign_recipients WHERE user_id = :uid"),
+        {"uid": user_id},
+    ).scalar() or 0
+
+    webauthn_credential_count = db.execute(
+        text("SELECT COUNT(*) FROM webauthn_credentials WHERE user_id = :uid"),
+        {"uid": user_id},
+    ).scalar() or 0
+
+    auth_event_count = db.execute(
+        text("SELECT COUNT(*) FROM auth_events WHERE user_id = :uid"),
+        {"uid": user_id},
+    ).scalar() or 0
+
     user_role_count = db.execute(
         text("SELECT COUNT(*) FROM user_roles WHERE user_id = :uid"),
         {"uid": user_id},
@@ -1179,6 +1215,9 @@ def hard_delete_user_tree(
         "forum_ballot_feedback_count": forum_ballot_feedback_count,
         "forum_ballot_vote_count": forum_ballot_vote_count,
         "forum_topic_read_count": forum_topic_read_count,
+        "email_campaign_recipient_count": email_campaign_recipient_count,
+        "webauthn_credential_count": webauthn_credential_count,
+        "auth_event_count": auth_event_count,
     })
 
     if not hmac.compare_digest(expected, confirm_hash):
@@ -1249,6 +1288,11 @@ def hard_delete_user_tree(
             {"uid": user_id},
         )
 
+        db.execute(
+            text("DELETE FROM email_campaign_recipients WHERE user_id = :uid"),
+            {"uid": user_id},
+        )
+
         db.query(ForumBallotFeedback).filter(
             ForumBallotFeedback.user_id == user_id
         ).delete(synchronize_session=False)
@@ -1283,6 +1327,9 @@ def hard_delete_user_tree(
                 "forum_ballot_feedback": forum_ballot_feedback_count,
                 "forum_ballot_votes": forum_ballot_vote_count,
                 "forum_topic_reads": forum_topic_read_count,
+                "email_campaign_recipients": int(email_campaign_recipient_count),
+                "webauthn_credentials": int(webauthn_credential_count),
+                "auth_events": int(auth_event_count),
             },
             affected_ids={
                 "user_ids": [user_id],
@@ -1698,6 +1745,10 @@ def hard_delete_user(
         db.execute(
             text("DELETE FROM user_discipline_groups WHERE user_id = :uid"),
             {"uid": user_id},
+        )
+        db.execute(
+            text("DELETE FROM email_campaign_recipients WHERE user_id = :user_id"),
+            {"user_id": user_id},
         )
         db.execute(
             text("DELETE FROM user_roles WHERE user_id = :uid"),
