@@ -23,3 +23,5 @@ webauthn==2.0.0
 numpy
 Markdown
 bleach
+pypdf
+reportlab
