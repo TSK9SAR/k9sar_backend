@@ -21,7 +21,7 @@ from app.models.admin_cleanup_event import AdminCleanupEvent
 from app.models.handler_affiliations import HandlerAffiliation
 from app.models.forum import ForumTopic, ForumPost, ForumBallotVote, ForumBallot, ForumBallotFeedback, ForumBallotChoice, ForumTopicRead
 from app.schemas.forum import CleanupConfirmIn
-
+from app.models.id_headshot import HandlerIdHeadshot, DogIdHeadshot
 
 router = APIRouter(prefix="/admin", tags=["Admin Deletes"])
 
@@ -53,6 +53,24 @@ def log_cleanup_event(
             warnings_json=warnings or [],
             confirmation_text=confirmation_text,
         )
+    )
+
+def dog_headshot_count(db: Session, dog_ids: list[int]) -> int:
+    if not dog_ids:
+        return 0
+    return (
+        db.query(DogIdHeadshot)
+        .filter(DogIdHeadshot.dog_id.in_(dog_ids))
+        .count()
+    )
+
+def handler_headshot_count(db: Session, handler_id: int | None) -> int:
+    if not handler_id:
+        return 0
+    return (
+        db.query(HandlerIdHeadshot)
+        .filter(HandlerIdHeadshot.handler_id == handler_id)
+        .count()
     )
 
 def _hmac(payload: dict) -> str:
@@ -346,6 +364,9 @@ def hard_delete_orphan_dogs(
 
     try:
         if dog_ids:
+            db.query(DogIdHeadshot).filter(
+                DogIdHeadshot.dog_id.in_(dog_ids)
+            ).delete(synchronize_session=False)
             db.query(Dog).filter(
                 Dog.dog_id.in_(dog_ids)
             ).delete(synchronize_session=False)
@@ -519,6 +540,16 @@ def hard_delete_dog(
                 Team.team_id.in_(team_ids)
             ).delete(synchronize_session=False)
 
+        dog_headshots = (
+            db.query(DogIdHeadshot)
+            .filter(DogIdHeadshot.dog_id == dog_id)
+            .count()
+        )
+
+        db.query(DogIdHeadshot).filter(
+            DogIdHeadshot.dog_id == dog_id
+        ).delete(synchronize_session=False)
+
         db.query(Dog).filter(
             Dog.dog_id == dog_id
         ).delete(synchronize_session=False)
@@ -535,6 +566,7 @@ def hard_delete_dog(
                 "teams": len(team_ids),
                 "certifications": len(cert_ids),
                 "certification_events": event_count,
+                "dog_headshots": dog_headshots,
             },
             affected_ids={
                 "dog_ids": [dog_id],
@@ -555,6 +587,7 @@ def hard_delete_dog(
             "teams": len(team_ids),
             "certifications": len(cert_ids),
             "certification_events": event_count,
+            "dog_headshots": dog_headshots, 
         }
 
     except Exception:
@@ -718,6 +751,13 @@ def hard_delete_handler_keep_user(
         .all()
     ]
 
+    handler_headshots = (
+        db.query(HandlerIdHeadshot)
+        .filter(HandlerIdHeadshot.handler_id == handler_id)
+        .count()
+        if handler_id else 0
+    )
+
     cert_ids = []
     if team_ids:
         cert_ids = [
@@ -747,6 +787,8 @@ def hard_delete_handler_keep_user(
 
         if not other_team_exists:
             orphan_dog_ids.append(dog_id)
+    
+    dog_headshots = dog_headshot_count(db, orphan_dog_ids)
 
     affiliation_count = (
         db.query(HandlerAffiliation)
@@ -788,12 +830,20 @@ def hard_delete_handler_keep_user(
             ).delete(synchronize_session=False)
 
         if orphan_dog_ids:
+            db.query(DogIdHeadshot).filter(
+                DogIdHeadshot.dog_id.in_(orphan_dog_ids)
+            ).delete(synchronize_session=False)
+
             db.query(Dog).filter(
                 Dog.dog_id.in_(orphan_dog_ids)
             ).delete(synchronize_session=False)
 
         db.query(HandlerAffiliation).filter(
             HandlerAffiliation.handler_id == handler_id
+        ).delete(synchronize_session=False)
+
+        db.query(HandlerIdHeadshot).filter(
+            HandlerIdHeadshot.handler_id == handler_id
         ).delete(synchronize_session=False)
 
         db.query(Handler).filter(
@@ -814,6 +864,8 @@ def hard_delete_handler_keep_user(
                 "dogs": len(orphan_dog_ids),
                 "certifications": len(cert_ids),
                 "certification_events": event_count,
+                "handler_headshots": handler_headshots,
+                "dog_headshots": dog_headshots,
             },
             affected_ids={
                 "team_ids": team_ids,
@@ -835,6 +887,8 @@ def hard_delete_handler_keep_user(
             "dogs": len(orphan_dog_ids),
             "certifications": len(cert_ids),
             "certification_events": event_count,
+            "handler_headshots": handler_headshots,
+            "dog_headshots": dog_headshots,
         }
 
     except Exception:
@@ -1197,6 +1251,10 @@ def hard_delete_user_tree(
         {"uid": user_id},
     ).scalar() or 0
 
+    handler_headshots = handler_headshot_count(db, handler_id)
+    dog_headshots = dog_headshot_count(db, orphan_dog_ids)
+
+
     expected = _hmac({
         "entity": "user_tree",
         "mode": "delete_user_tree",
@@ -1246,6 +1304,10 @@ def hard_delete_user_tree(
             ).delete(synchronize_session=False)
 
         if orphan_dog_ids:
+            db.query(DogIdHeadshot).filter(
+                DogIdHeadshot.dog_id.in_(orphan_dog_ids)
+            ).delete(synchronize_session=False)
+
             db.query(Dog).filter(
                 Dog.dog_id.in_(orphan_dog_ids)
             ).delete(synchronize_session=False)
@@ -1253,6 +1315,10 @@ def hard_delete_user_tree(
         if handler:
             db.query(HandlerAffiliation).filter(
                 HandlerAffiliation.handler_id == handler.handler_id
+            ).delete(synchronize_session=False)
+
+            db.query(HandlerIdHeadshot).filter(
+                HandlerIdHeadshot.handler_id == handler_id
             ).delete(synchronize_session=False)
 
             db.query(Handler).filter(
@@ -1330,6 +1396,8 @@ def hard_delete_user_tree(
                 "email_campaign_recipients": int(email_campaign_recipient_count),
                 "webauthn_credentials": int(webauthn_credential_count),
                 "auth_events": int(auth_event_count),
+                "handler_headshots": handler_headshots,
+                "dog_headshots": dog_headshots,
             },
             affected_ids={
                 "user_ids": [user_id],
@@ -1358,6 +1426,8 @@ def hard_delete_user_tree(
             "dogs": len(orphan_dog_ids),
             "certifications": len(cert_ids),
             "certification_events": event_count,
+            "handler_headshots": handler_headshots,
+            "dog_headshots": dog_headshots, 
         }
 
     except Exception:
@@ -1771,6 +1841,9 @@ def hard_delete_user(
                 if not still_used:
                     dog = db.query(Dog).filter(Dog.dog_id == dog_id).first()
                     if dog:
+                        db.query(DogIdHeadshot).filter(
+                            DogIdHeadshot.dog_id == dog_id
+                            ).delete(synchronize_session=False)
                         db.delete(dog)
 
         db.commit()
