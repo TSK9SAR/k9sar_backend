@@ -1826,6 +1826,10 @@ def hard_delete_user(
         )
         # 4) handler
         if handler:
+            db.query(HandlerIdHeadshot).filter(
+                HandlerIdHeadshot.handler_id == handler.handler_id
+            ).delete(synchronize_session=False)
+
             db.delete(handler)
 
         # 5) user
