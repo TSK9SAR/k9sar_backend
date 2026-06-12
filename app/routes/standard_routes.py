@@ -24,6 +24,8 @@ from io import BytesIO
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
+from reportlab.platypus import Image, Spacer
+from reportlab.lib.utils import ImageReader
 
 router = APIRouter(prefix="/standards", tags=["Standards"])
 
@@ -258,7 +260,7 @@ def render_standards_booklet_html(standards) -> str:
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>SAR K9 Standards Booklet</title>
+  <title>Tri-State K9 Standards Summary Booklet</title>
   <style>
     body {{
       font-family: Arial, sans-serif;
@@ -298,6 +300,19 @@ def render_standards_booklet_html(standards) -> str:
 
     .toc li {{
       margin: 0.15in 0;
+    }}
+
+    .cover-logo-wrap {{
+        position: relative;
+        height: 250px;
+        margin-top: 0.35in;
+    }}
+
+    .cover-logo {{
+        width: 340px;
+        height: 340px;
+        object-fit: contain;
+        opacity: 1.0;
     }}
 
     .standard-section {{
@@ -385,6 +400,9 @@ def render_standards_booklet_html(standards) -> str:
     <section class="cover-page">
       <h1>Tri-State K9 Standard Summaries Booklet</h1>
       <p>Combined standard summaries document</p>
+        <div class="cover-logo-wrap">
+            <img src="/static/images/ts_logo_wm.png?v=2" alt="" class="cover-logo">
+        </div>
     </section>
 
     <section class="toc">
@@ -423,23 +441,47 @@ def make_cover_page() -> BytesIO:
     c = canvas.Canvas(buf, pagesize=letter)
     width, height = letter
 
+    # Watermark logo
+    try:
+        logo = ImageReader("/app/static/images/ts_logo_wm.png")
+
+        logo_size = 280
+
+        c.drawImage(
+            logo,
+            (width - logo_size) / 2,
+            height - 520,
+            width=logo_size,
+            height=logo_size,
+            preserveAspectRatio=True,
+            mask="auto",
+        )
+    except Exception:
+        pass
+
     c.setTitle("Tri-State K9 Standards Booklet")
+
     c.setFillColorRGB(0.10, 0.25, 0.55)
     c.setFont("Helvetica-Bold", 28)
-    c.drawCentredString(width / 2, height - 180, str("Tri-State K9 Standards Booklet"))
+    c.drawCentredString(
+        width / 2,
+        height - 180,
+        "Tri-State K9 Standards Booklet"
+    )
+
     c.setFillColor(colors.black)
     c.setFont("Helvetica", 14)
     c.drawCentredString(
         width / 2,
         height - 220,
-        str("Combined Current Standards")
+        "Combined Current Standards"
     )
 
     c.setFont("Helvetica", 10)
     c.drawCentredString(
         width / 2,
         72,
-        str("Generated from the TSK9SAR Standards Repository")
+        "Generated from the TSK9SAR Standards Repository"
     )
 
     c.save()
