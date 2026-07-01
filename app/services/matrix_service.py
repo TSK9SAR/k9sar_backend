@@ -271,12 +271,10 @@ def build_certification_matrix(db: Session, current_user: User, affiliation_id: 
 
     cert_rows = (
         db.query(Certification, Standard, Discipline)
-        .join(
-            latest_cert_ids,
-            latest_cert_ids.c.certification_id == Certification.certification_id,
-        )
         .join(Standard, Certification.standard_id == Standard.standard_id)
         .join(Discipline, Standard.discipline_id == Discipline.discipline_id)
+        .filter(Certification.team_id.in_(team_ids))
+        .filter(Certification.status != "revoked")
         .all()
     )
 
