@@ -293,18 +293,42 @@ def affiliation_directory_embed(
     if not affiliation:
         raise HTTPException(status_code=404, detail="Embed not found")
     
-    latest_cert_ids = (
+    ranked_cert_ids = (
         db.query(
+            Certification.certification_id.label("certification_id"),
             Certification.team_id.label("team_id"),
             Standard.discipline_id.label("discipline_id"),
-            func.max(Certification.certification_id).label("latest_certification_id"),
+            func.row_number()
+            .over(
+                partition_by=(
+                    Certification.team_id,
+                    Standard.discipline_id,
+                ),
+                order_by=(
+                    Certification.date_awarded.desc(),
+                    Certification.expires_at.desc(),
+                    Certification.certification_id.desc(),
+                ),
+            )
+            .label("row_num"),
         )
-        .join(Standard, Standard.standard_id == Certification.standard_id)
+        .join(
+            Standard,
+            Standard.standard_id == Certification.standard_id,
+        )
         .filter(Certification.status != "revoked")
-        .group_by(
-            Certification.team_id,
-            Standard.discipline_id,
+        .subquery()
+    )
+
+    latest_cert_ids = (
+        db.query(
+            ranked_cert_ids.c.certification_id.label(
+                "latest_certification_id"
+            ),
+            ranked_cert_ids.c.team_id,
+            ranked_cert_ids.c.discipline_id,
         )
+        .filter(ranked_cert_ids.c.row_num == 1)
         .subquery()
     )
 
@@ -320,7 +344,10 @@ def affiliation_directory_embed(
             Certification.status,
         )
         .join(Handler, Handler.user_id == User.user_id)
-        .join(HandlerAffiliation, HandlerAffiliation.handler_id == Handler.handler_id)
+        .join(
+            HandlerAffiliation,
+            HandlerAffiliation.handler_id == Handler.handler_id,
+        )
         .join(Team, Team.handler_id == Handler.handler_id)
         .join(Dog, Dog.dog_id == Team.dog_id)
     )
@@ -334,10 +361,25 @@ def affiliation_directory_embed(
             )
             .outerjoin(
                 Certification,
-                Certification.certification_id == latest_cert_ids.c.latest_certification_id,
+                Certification.certification_id
+                == latest_cert_ids.c.latest_certification_id,
             )
-            .outerjoin(Standard, Standard.standard_id == Certification.standard_id)
-            .outerjoin(Discipline, Discipline.discipline_id == Standard.discipline_id)
+            .outerjoin(
+                Standard,
+                (
+                    Standard.standard_id
+                    == Certification.standard_id
+                )
+                & (
+                    Standard.discipline_id
+                    == latest_cert_ids.c.discipline_id
+                ),
+            )
+            .outerjoin(
+                Discipline,
+                Discipline.discipline_id
+                == Standard.discipline_id,
+            )
         )
     else:
         query = (
@@ -348,12 +390,38 @@ def affiliation_directory_embed(
             )
             .join(
                 Certification,
-                Certification.certification_id == latest_cert_ids.c.latest_certification_id,
+                Certification.certification_id
+                == latest_cert_ids.c.latest_certification_id,
             )
-            .join(Standard, Standard.standard_id == Certification.standard_id)
-            .join(Discipline, Discipline.discipline_id == Standard.discipline_id)
-            .filter(Certification.status.in_(["active","pending","expiring","expired","incomplete"]))
+            .join(
+                Standard,
+                (
+                    Standard.standard_id
+                    == Certification.standard_id
+                )
+                & (
+                    Standard.discipline_id
+                    == latest_cert_ids.c.discipline_id
+                ),
+            )
+            .join(
+                Discipline,
+                Discipline.discipline_id
+                == Standard.discipline_id,
+            )
+            .filter(
+                Certification.status.in_(
+                    [
+                        "active",
+                        "pending",
+                        "expiring",
+                        "expired",
+                        "incomplete",
+                    ]
+                )
+            )
         )
+
     rows = (
         query        
         .filter(
