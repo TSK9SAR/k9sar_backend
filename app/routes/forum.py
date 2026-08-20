@@ -1,9 +1,11 @@
-from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
+import os
+from datetime import datetime, timezone
+from jose import JWTError, jwt
 from app.database import get_db
 
 from app.schemas.forum import (
@@ -41,8 +43,6 @@ from app.models.forum import (
 
 from app.utils.auth import get_current_user
 
-import os
-
 from app.services.forum_notifications import (
     send_new_topic_notifications,
     send_new_reply_notifications,
@@ -51,6 +51,83 @@ from app.utils.auth import require_admin
 
 router = APIRouter(prefix="/api/forums", tags=["Forum"])
 
+FORUM_LINK_SECRET = os.getenv("FORUM_LINK_SECRET")
+FORUM_LINK_ALGORITHM = "HS256"
+FORUM_LINK_TTL_DAYS = 30
+
+from app.services.forum_link_tokens import (
+    FORUM_LINK_SECRET,
+    FORUM_LINK_ALGORITHM,
+)
+
+@router.get("/email-entry/{token}")
+def validate_forum_email_entry(
+    token: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if not FORUM_LINK_SECRET:
+        raise HTTPException(
+            status_code=500,
+            detail="Forum email links are not configured",
+        )
+
+    try:
+        payload = jwt.decode(
+            token,
+            FORUM_LINK_SECRET,
+            algorithms=[FORUM_LINK_ALGORITHM],
+        )
+    except JWTError:
+        raise HTTPException(
+            status_code=400,
+            detail="This forum link is invalid or has expired.",
+        )
+
+    if payload.get("purpose") != "forum_email_entry":
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid forum link.",
+        )
+
+    try:
+        intended_user_id = int(payload["user_id"])
+        topic_id = int(payload["topic_id"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid forum link.",
+        )
+
+    if int(current_user.user_id) != intended_user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="This forum link was sent to a different member.",
+        )
+
+    topic = (
+        db.query(ForumTopic)
+        .filter(ForumTopic.topic_id == topic_id)
+        .first()
+    )
+
+    if not topic:
+        raise HTTPException(
+            status_code=404,
+            detail="Forum topic not found.",
+        )
+
+    category = (
+        db.query(ForumCategory)
+        .filter(ForumCategory.category_id == topic.category_id)
+        .first()
+    )
+
+    _require_category_access(current_user, category)
+
+    return {
+        "topic_id": topic.topic_id,
+    }
 
 def _user_roles(user) -> set[str]:
     return {r.role_name for r in getattr(user, "roles", [])}
@@ -163,7 +240,7 @@ def list_forums(
 
 
 def ballot_is_open(ballot: ForumBallot) -> bool:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     if ballot.status != "open":
         return False
@@ -401,7 +478,7 @@ def create_topic(
         topic_type=payload.topic_type,
         related_standard_id=payload.related_standard_id,
         created_by_user_id=current_user.user_id,
-        last_post_at=datetime.utcnow(),
+        last_post_at=datetime.now(timezone.utc),
     )
 
     db.add(topic)
@@ -410,6 +487,7 @@ def create_topic(
     post = ForumPost(
         topic_id=topic.topic_id,
         body_md=payload.body_md.strip(),
+        sort_order=1,
         created_by_user_id=current_user.user_id,
     )
 
@@ -456,13 +534,13 @@ def get_topic(
     )
 
     if read_row:
-        read_row.last_read_at = datetime.utcnow()
+        read_row.last_read_at = datetime.now(timezone.utc)
     else:
         db.add(
             ForumTopicRead(
                 user_id=current_user.user_id,
                 topic_id=topic.topic_id,
-                last_read_at=datetime.utcnow(),
+                last_read_at=datetime.now(timezone.utc),
             )
         )
 
@@ -795,7 +873,7 @@ def vote_ballot(
         ForumBallotVote.user_id == current_user.user_id,
     ).delete(synchronize_session=False)
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     for choice_id in requested_choice_ids:
         db.add(
@@ -839,7 +917,7 @@ def create_reply(
         created_by_user_id=current_user.user_id,
     )
 
-    topic.last_post_at = datetime.utcnow()
+    topic.last_post_at = datetime.now(timezone.utc)
 
     db.add(post)
     db.commit()
@@ -887,7 +965,7 @@ def update_post(
         raise HTTPException(status_code=403, detail="Topic is locked")
 
     post.body_md = payload.body_md.strip()
-    post.edited_at = datetime.utcnow()
+    post.edited_at = datetime.now(timezone.utc)
 
     db.commit()
     db.refresh(post)
@@ -954,8 +1032,8 @@ def delete_post(
         raise HTTPException(status_code=403, detail="Topic is locked")
 
     # Safer than hard delete: preserves thread and poll/vote history.
-    post.deleted_at = datetime.utcnow()
-    post.edited_at = datetime.utcnow()
+    post.deleted_at = datetime.now(timezone.utc)
+    post.edited_at = datetime.now(timezone.utc)
 
     db.commit()
 
@@ -998,7 +1076,7 @@ def save_ballot_feedback(
 
     if feedback:
         feedback.feedback_text = text
-        feedback.updated_at = datetime.utcnow()
+        feedback.updated_at = datetime.now(timezone.utc)
     else:
         feedback = ForumBallotFeedback(
             ballot_id=ballot_id,
@@ -1164,7 +1242,7 @@ def create_topic_poll_question(
         created_by_user_id=current_user.user_id,
     )
 
-    topic.last_post_at = datetime.utcnow()
+    topic.last_post_at = datetime.now(timezone.utc)
 
     db.add(post)
     db.flush()

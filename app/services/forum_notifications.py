@@ -4,6 +4,7 @@ from app.models.role import Role
 from app.services.mailer import send_email  # adjust to your actual mailer function
 from app.database import SessionLocal
 from app.models.forum import ForumTopic, ForumPost
+from app.services.forum_link_tokens import create_forum_email_token
 
 def _full_name(user: User) -> str:
     first = getattr(user, "first_name", "") or ""
@@ -177,11 +178,6 @@ def _send_forum_notifications(
 ):
     users = db.query(User).filter(User.is_active == True).all()
 
-    topic_url = (
-        f"{public_base_url.rstrip('/')}/login"
-        f"?next=/forums/topics/{topic.topic_id}"
-    )
-
     if kind == "reply":
         subject = f"[TSK9SAR Forum] Reply: {topic.title}"
         action_text = "replied"
@@ -190,15 +186,6 @@ def _send_forum_notifications(
         action_text = "posted"
 
     author_name = _full_name(author)
-
-    body = f"""\
-{author_name} {action_text} in {category.name}:
-
-{_excerpt(post.body_md)}
-
-Open topic:
-{topic_url}
-"""
 
     for user in users:
         if user.user_id == author.user_id:
@@ -213,8 +200,31 @@ Open topic:
         if not _wants_email(db, user, category, topic.topic_type):
             continue
 
+        forum_token = create_forum_email_token(
+            user_id=user.user_id,
+            topic_id=topic.topic_id,
+        )
+
+        topic_url = (
+            f"{public_base_url.rstrip('/')}"
+            f"/forums/email-entry/{forum_token}"
+        )
+
+        body = f"""\
+{author_name} {action_text} in {category.name}:
+
+{_excerpt(post.body_md)}
+
+View & Reply:
+{topic_url}
+
+"""
+
         try:
-            print(f"FORUM EMAIL sending to {user.email}: {subject}", flush=True)
+            print(
+                f"FORUM EMAIL sending to {user.email}: {subject}",
+                flush=True,
+            )
 
             ok = send_email(
                 to_email=user.email,
@@ -223,14 +233,21 @@ Open topic:
                 html_body=None,
                 reply_to=None,
             )
-            
+
             if ok:
-                print(f"FORUM EMAIL sent to {user.email}", flush=True)
+                print(
+                    f"FORUM EMAIL sent to {user.email}",
+                    flush=True,
+                )
             else:
-                print(f"FORUM EMAIL returned False for {user.email}", flush=True)
+                print(
+                    f"FORUM EMAIL returned False for {user.email}",
+                    flush=True,
+                )
 
         except Exception as e:
             print(
-                f"FORUM EMAIL FAILED to {user.email}: {type(e).__name__}: {e}",
+                f"FORUM EMAIL FAILED to {user.email}: "
+                f"{type(e).__name__}: {e}",
                 flush=True,
             )

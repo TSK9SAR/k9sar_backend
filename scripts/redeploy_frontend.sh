@@ -26,15 +26,15 @@ if [[ ! -f "$UPLOAD/index.html" ]]; then
   exit 1
 fi
 
-mkdir -p "$BACKUPS"
+#mkdir -p "$BACKUPS"
 
 # --- backup current live ---
-if [[ -d "$LIVE" ]]; then
-  echo "Backing up current live site..."
-  sudo mkdir -p "$BACKUP_DIR"
-  # preserve permissions/links/etc
-  sudo rsync -a --delete "$LIVE"/ "$BACKUP_DIR"/
-fi
+#if [[ -d "$LIVE" ]]; then
+#  echo "Backing up current live site..."
+#  sudo mkdir -p "$BACKUP_DIR"
+#  # preserve permissions/links/etc
+#  sudo rsync -a --delete "$LIVE"/ "$BACKUP_DIR"/
+#fi
 
 # --- deploy (safe sync) ---
 echo "Deploying upload -> live..."
