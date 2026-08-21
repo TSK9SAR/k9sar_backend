@@ -13,11 +13,11 @@ def _full_name(user: User) -> str:
     return name or getattr(user, "email", "Someone")
 
 
-def _excerpt(text: str, limit: int = 500) -> str:
-    text = (text or "").strip()
-    if len(text) <= limit:
-        return text
-    return text[:limit].rstrip() + "..."
+# def _excerpt(text: str, limit: int = 500) -> str:
+#     text = (text or "").strip()
+#     if len(text) <= limit:
+#         return text
+#     return text[:limit].rstrip() + "..."
 
 
 def _user_role_names(user: User) -> set[str]:
@@ -213,9 +213,9 @@ def _send_forum_notifications(
         body = f"""\
 {author_name} {action_text} in {category.name}:
 
-{_excerpt(post.body_md)}
+{post.body_md.strip()}
 
-View & Reply:
+VIEW DISCUSSION AND REPLY:
 {topic_url}
 
 """
