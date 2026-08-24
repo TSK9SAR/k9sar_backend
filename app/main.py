@@ -51,6 +51,10 @@ from app.routes import admin_forum_surveys
 from app.routes import public_embeds
 from app.routes import id_headshots
 from app.routes import id_cards
+from app.routes.admin_stored_files import router as admin_stored_files_router
+from app.routes.stored_files import router as stored_files_router
+
+
 
 #============================================================
 # FastAPI app initialization
@@ -175,8 +179,8 @@ app.include_router(admin_forum_surveys.router, prefix="/api")
 app.include_router(public_embeds.router, prefix="/api")  # <-- from public_embeds.py
 app.include_router(id_headshots.router, prefix="/api")
 app.include_router(id_cards.router, prefix="/api")
-
-
+app.include_router(admin_stored_files_router, prefix="/api")
+app.include_router(stored_files_router, prefix="/api")
 
 import inspect
 

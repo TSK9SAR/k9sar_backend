@@ -2,6 +2,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
+from fastapi.responses import FileResponse
+from app.services.stored_files import resolve_stored_path
 
 import os
 from datetime import datetime, timezone
@@ -39,6 +41,17 @@ from app.models.forum import (
     ForumBallotChoice,
     ForumBallotVote,
     ForumBallotFeedback,
+)
+
+from app.schemas.forum import ForumAttachmentOut
+
+from app.models.stored_files import (
+    StoredFile,
+    ForumPostAttachment,
+)
+from app.services.stored_files import (
+    stored_file_reference_count,
+    delete_physical_file,
 )
 
 from app.utils.auth import get_current_user
@@ -176,6 +189,42 @@ def _require_category_access(user, category: ForumCategory):
     if not _has_forum_access(user, category):
         raise HTTPException(status_code=403, detail="Not allowed to access this forum")
 
+
+
+def _post_attachments_out(
+    db: Session,
+    post_id: int,
+) -> list[ForumAttachmentOut]:
+    rows = (
+        db.query(
+            ForumPostAttachment,
+            StoredFile,
+        )
+        .join(
+            StoredFile,
+            StoredFile.file_id == ForumPostAttachment.file_id,
+        )
+        .filter(
+            ForumPostAttachment.post_id == post_id
+        )
+        .order_by(
+            ForumPostAttachment.sort_order.asc(),
+            ForumPostAttachment.attachment_id.asc(),
+        )
+        .all()
+    )
+
+    return [
+        ForumAttachmentOut(
+            attachment_id=link.attachment_id,
+            file_id=stored.file_id,
+            original_filename=stored.original_filename,
+            mime_type=stored.mime_type,
+            file_size=stored.file_size,
+            created_at=link.created_at,
+        )
+        for link, stored in rows
+    ]
 
 @router.get("/", response_model=list[ForumCategoryOut])
 def list_forums(
@@ -487,7 +536,7 @@ def create_topic(
     post = ForumPost(
         topic_id=topic.topic_id,
         body_md=payload.body_md.strip(),
-        sort_order=1,
+        sort_order=10,
         created_by_user_id=current_user.user_id,
     )
 
@@ -521,8 +570,6 @@ def get_topic(
         raise HTTPException(status_code=404, detail="Topic not found")
 
     _require_category_access(current_user, topic.category)
-
-    topic.posts = [p for p in topic.posts if p.deleted_at is None]
 
     read_row = (
         db.query(ForumTopicRead)
@@ -571,6 +618,10 @@ def get_topic(
                 created_at=p.created_at,
                 sort_order=p.sort_order,
                 post_type=p.post_type,
+                attachments=_post_attachments_out(
+                    db,
+                    p.post_id,
+                ),
             )
         )
 
@@ -588,6 +639,270 @@ def get_topic(
         posts=posts_out,
     )
 
+@router.post(
+    "/posts/{post_id}/attachments/{file_id}",
+    response_model=ForumAttachmentOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def attach_file_to_post(
+    post_id: int,
+    file_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    post = (
+        db.query(ForumPost)
+        .filter(
+            ForumPost.post_id == post_id,
+            ForumPost.deleted_at.is_(None),
+        )
+        .first()
+    )
+
+    if not post:
+        raise HTTPException(
+            status_code=404,
+            detail="Post not found",
+        )
+
+    topic = post.topic
+
+    _require_category_access(
+        current_user,
+        topic.category,
+    )
+
+    is_author = (
+        post.created_by_user_id
+        == current_user.user_id
+    )
+    is_admin = _is_admin(current_user)
+
+    if not is_author and not is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Not allowed to attach files to this post",
+        )
+
+    if topic.is_locked and not is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Topic is locked",
+        )
+
+    stored = (
+        db.query(StoredFile)
+        .filter(StoredFile.file_id == file_id)
+        .first()
+    )
+
+    if not stored:
+        raise HTTPException(
+            status_code=404,
+            detail="Stored file not found",
+        )
+
+    existing = (
+        db.query(ForumPostAttachment)
+        .filter(
+            ForumPostAttachment.post_id == post_id,
+            ForumPostAttachment.file_id == file_id,
+        )
+        .first()
+    )
+
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail="File is already attached to this post",
+        )
+
+    max_sort = (
+        db.query(
+            func.max(
+                ForumPostAttachment.sort_order
+            )
+        )
+        .filter(
+            ForumPostAttachment.post_id == post_id
+        )
+        .scalar()
+    )
+
+    link = ForumPostAttachment(
+        post_id=post_id,
+        file_id=file_id,
+        sort_order=int(max_sort or 0) + 10,
+    )
+
+    db.add(link)
+    db.commit()
+    db.refresh(link)
+
+    return ForumAttachmentOut(
+        attachment_id=link.attachment_id,
+        file_id=stored.file_id,
+        original_filename=stored.original_filename,
+        mime_type=stored.mime_type,
+        file_size=stored.file_size,
+        created_at=link.created_at,
+    )
+
+@router.delete("/posts/{post_id}/attachments/{file_id}")
+def detach_file_from_post(
+    post_id: int,
+    file_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    post = (
+        db.query(ForumPost)
+        .filter(
+            ForumPost.post_id == post_id,
+            ForumPost.deleted_at.is_(None),
+        )
+        .first()
+    )
+
+    if not post:
+        raise HTTPException(
+            status_code=404,
+            detail="Post not found",
+        )
+
+    topic = post.topic
+    _require_category_access(current_user, topic.category)
+
+    is_author = (
+        post.created_by_user_id == current_user.user_id
+    )
+    is_admin = _is_admin(current_user)
+
+    if not is_author and not is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Not allowed to remove attachments from this post",
+        )
+
+    link = (
+        db.query(ForumPostAttachment)
+        .filter(
+            ForumPostAttachment.post_id == post_id,
+            ForumPostAttachment.file_id == file_id,
+        )
+        .first()
+    )
+
+    if not link:
+        raise HTTPException(
+            status_code=404,
+            detail="Attachment not found",
+        )
+
+    stored = (
+        db.query(StoredFile)
+        .filter(StoredFile.file_id == file_id)
+        .first()
+    )
+
+    attachment_id = link.attachment_id
+
+    # First detach it from this post.
+    db.delete(link)
+    db.commit()
+
+    deleted_file = False
+
+    # If nothing else references the stored file,
+    # remove the StoredFile row and physical file.
+    if stored:
+        reference_count = stored_file_reference_count(
+            db,
+            file_id,
+        )
+
+        if reference_count == 0:
+            storage_path = stored.storage_path
+
+            # Remove DB record first.
+            db.delete(stored)
+            db.commit()
+
+            # Then remove physical file.
+            delete_physical_file(storage_path)
+
+            deleted_file = True
+
+    return {
+        "status": "detached",
+        "attachment_id": attachment_id,
+        "post_id": post_id,
+        "file_id": file_id,
+        "stored_file_deleted": deleted_file,
+    }
+
+@router.get("/attachments/{attachment_id}")
+def download_forum_attachment(
+    attachment_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    row = (
+        db.query(
+            ForumPostAttachment,
+            StoredFile,
+            ForumPost,
+        )
+        .join(
+            StoredFile,
+            StoredFile.file_id == ForumPostAttachment.file_id,
+        )
+        .join(
+            ForumPost,
+            ForumPost.post_id == ForumPostAttachment.post_id,
+        )
+        .filter(
+            ForumPostAttachment.attachment_id == attachment_id
+        )
+        .first()
+    )
+
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail="Attachment not found",
+        )
+
+    link, stored, post = row
+
+    if post.deleted_at is not None:
+        raise HTTPException(
+            status_code=404,
+            detail="Attachment not found",
+        )
+
+    topic = post.topic
+
+    _require_category_access(
+        current_user,
+        topic.category,
+    )
+
+    file_path = resolve_stored_path(
+        stored.storage_path
+    )
+
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="Stored file is missing",
+        )
+
+    return FileResponse(
+        path=str(file_path),
+        media_type=stored.mime_type or "application/octet-stream",
+        filename=stored.original_filename,
+    )
 
 def _ballot_out(db: Session, ballot: ForumBallot, current_user) -> BallotOut:
     vote_counts = dict(
@@ -1017,27 +1332,109 @@ def delete_post(
     )
 
     if not post or post.deleted_at is not None:
-        raise HTTPException(status_code=404, detail="Post not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Post not found",
+        )
 
     topic = post.topic
-    _require_category_access(current_user, topic.category)
+    _require_category_access(
+        current_user,
+        topic.category,
+    )
 
-    is_author = post.created_by_user_id == current_user.user_id
+    is_author = (
+        post.created_by_user_id
+        == current_user.user_id
+    )
     is_admin = _is_admin(current_user)
 
     if not is_author and not is_admin:
-        raise HTTPException(status_code=403, detail="Not allowed to delete this post")
+        raise HTTPException(
+            status_code=403,
+            detail="Not allowed to delete this post",
+        )
 
     if topic.is_locked and not is_admin:
-        raise HTTPException(status_code=403, detail="Topic is locked")
+        raise HTTPException(
+            status_code=403,
+            detail="Topic is locked",
+        )
 
-    # Safer than hard delete: preserves thread and poll/vote history.
+    #
+    # Remove attachment links first.
+    #
+    attachment_links = (
+        db.query(ForumPostAttachment)
+        .filter(
+            ForumPostAttachment.post_id == post_id
+        )
+        .all()
+    )
+
+    file_ids = list({
+        link.file_id
+        for link in attachment_links
+    })
+
+    for link in attachment_links:
+        db.delete(link)
+
+    #
+    # Make the deleted links visible to subsequent
+    # reference-count queries without committing yet.
+    #
+    db.flush()
+
+    #
+    # Remove StoredFile rows that no longer have
+    # any references elsewhere.
+    #
+    physical_paths = []
+
+    for file_id in file_ids:
+        stored = (
+            db.query(StoredFile)
+            .filter(
+                StoredFile.file_id == file_id
+            )
+            .first()
+        )
+
+        if not stored:
+            continue
+
+        reference_count = stored_file_reference_count(
+            db,
+            file_id,
+        )
+
+        if reference_count == 0:
+            physical_paths.append(
+                stored.storage_path
+            )
+            db.delete(stored)
+
+    #
+    # Soft-delete the forum post itself.
+    #
     post.deleted_at = datetime.now(timezone.utc)
     post.edited_at = datetime.now(timezone.utc)
 
     db.commit()
 
-    return {"ok": True}
+    #
+    # Database transaction succeeded.
+    # Now remove unreferenced physical files.
+    #
+    for storage_path in physical_paths:
+        delete_physical_file(storage_path)
+
+    return {
+        "ok": True,
+        "attachments_removed": len(attachment_links),
+        "stored_files_deleted": len(physical_paths),
+    }
 
 @router.post("/ballots/{ballot_id}/feedback", response_model=BallotFeedbackOut)
 def save_ballot_feedback(

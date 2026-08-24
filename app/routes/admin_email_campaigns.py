@@ -30,6 +30,12 @@ from app.models.user_discipline_group import user_discipline_groups
 from markdown import markdown
 import bleach
 
+from app.models.stored_files import (
+    StoredFile,
+    EmailCampaignAttachment,
+)
+
+from app.services.stored_files import resolve_stored_path
 
 from app.schemas.email_campaigns import (
     EmailAudiencePreviewRequest,
@@ -397,6 +403,38 @@ def send_email_audience(
     db.add(campaign)
     db.flush()
 
+    attachment_file_ids = list(dict.fromkeys(
+        req.attachment_file_ids or []
+    ))
+
+    for sort_index, file_id in enumerate(attachment_file_ids):
+        stored = (
+            db.query(StoredFile)
+            .filter(StoredFile.file_id == file_id)
+            .first()
+        )
+
+        if not stored:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Stored file {file_id} was not found.",
+            )
+
+        if stored.uploaded_by_user_id != current_user.user_id:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Stored file {file_id} is not available to this campaign.",
+            )
+
+        db.add(
+            EmailCampaignAttachment(
+                campaign_id=campaign.campaign_id,
+                file_id=file_id,
+                delivery_mode="attachment",
+                sort_order=(sort_index + 1) * 10,
+            )
+        )
+
     recipient_rows = []
 
     for user in users:
@@ -411,6 +449,51 @@ def send_email_audience(
         recipient_rows.append((row, user))
 
     db.commit()
+
+    #
+    # Build the attachment list that will be handed to send_email().
+    # Do this once -- the same files go to every recipient.
+    #
+    mail_attachments = []
+
+    if attachment_file_ids:
+        rows = (
+            db.query(
+                EmailCampaignAttachment,
+                StoredFile,
+            )
+            .join(
+                StoredFile,
+                StoredFile.file_id == EmailCampaignAttachment.file_id,
+            )
+            .filter(
+                EmailCampaignAttachment.campaign_id == campaign.campaign_id
+            )
+            .order_by(
+                EmailCampaignAttachment.sort_order.asc(),
+                EmailCampaignAttachment.attachment_id.asc(),
+            )
+            .all()
+        )
+
+        for link, stored in rows:
+            file_path = resolve_stored_path(
+                stored.storage_path
+            )
+
+            if not file_path.exists() or not file_path.is_file():
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Stored file is missing: {stored.original_filename}",
+                )
+
+            mail_attachments.append(
+                {
+                    "path": str(file_path),
+                    "filename": stored.original_filename,
+                    "mime_type": stored.mime_type,
+                }
+            )
 
     sent_count = 0
     failed_count = 0
@@ -434,13 +517,17 @@ def send_email_audience(
 
             html_body = render_markdown_email(personalized_body)
 
-            send_email(
+            sent_ok = send_email(
                 to_email=row.email,
                 reply_to=reply_to,
                 subject=subject,
                 text_body=personalized_body,
                 html_body=html_body,
+                attachments=mail_attachments,
             )
+
+            if not sent_ok:
+                raise RuntimeError("SMTP send failed")
 
             row.status = "sent"
             row.sent_at = datetime.utcnow()
@@ -482,8 +569,7 @@ def email_campaign_activity(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_supervisor),
 ):
-
-    rows = (
+    campaigns = (
         db.query(EmailCampaign)
         .order_by(
             EmailCampaign.sent_at.is_(None),
@@ -494,22 +580,79 @@ def email_campaign_activity(
         .all()
     )
 
+    campaign_ids = [
+        c.campaign_id
+        for c in campaigns
+    ]
+
+    attachments_by_campaign = {}
+
+    if campaign_ids:
+        attachment_rows = (
+            db.query(
+                EmailCampaignAttachment,
+                StoredFile,
+            )
+            .join(
+                StoredFile,
+                StoredFile.file_id == EmailCampaignAttachment.file_id,
+            )
+            .filter(
+                EmailCampaignAttachment.campaign_id.in_(campaign_ids)
+            )
+            .order_by(
+                EmailCampaignAttachment.campaign_id.asc(),
+                EmailCampaignAttachment.sort_order.asc(),
+                EmailCampaignAttachment.attachment_id.asc(),
+            )
+            .all()
+        )
+
+        for link, stored in attachment_rows:
+            attachments_by_campaign.setdefault(
+                link.campaign_id,
+                [],
+            ).append(
+                {
+                    "attachment_id": link.attachment_id,
+                    "file_id": stored.file_id,
+                    "original_filename": stored.original_filename,
+                    "mime_type": stored.mime_type,
+                    "file_size": stored.file_size,
+                    "delivery_mode": link.delivery_mode,
+                }
+            )
+
     return [
         {
             "campaign_id": c.campaign_id,
             "created_at": c.created_at,
             "sent_at": c.sent_at,
             "sent_by_user_id": c.sent_by_user_id,
-            "sent_by_name": _full_name_from_id(db, c.sent_by_user_id) if getattr(c, "sent_by_user_id", None) else None,
+            "sent_by_name": (
+                _full_name_from_id(
+                    db,
+                    c.sent_by_user_id,
+                )
+                if getattr(
+                    c,
+                    "sent_by_user_id",
+                    None,
+                )
+                else None
+            ),
             "subject": c.subject,
             "body_text": c.body_text,
             "recipient_count": c.recipient_count,
             "status": c.status,
             "filter_json": c.filter_json,
+            "attachments": attachments_by_campaign.get(
+                c.campaign_id,
+                [],
+            ),
         }
-        for c in rows
+        for c in campaigns
     ]
-
 
 class AudienceInterpretIn(BaseModel):
     query: str

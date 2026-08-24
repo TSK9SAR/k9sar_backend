@@ -23,10 +23,79 @@ from app.models.forum import ForumTopic, ForumPost, ForumBallotVote, ForumBallot
 from app.schemas.forum import CleanupConfirmIn
 from app.models.id_headshot import HandlerIdHeadshot, DogIdHeadshot
 
+from app.models.stored_files import (
+    StoredFile,
+    ForumPostAttachment,
+    EmailCampaignAttachment,
+)
+from app.models.email_campaigns import (
+    EmailCampaign,
+    EmailCampaignRecipient,
+)
+from app.services.stored_files import (
+    stored_file_reference_count,
+    delete_physical_file,
+)
+
 router = APIRouter(prefix="/admin", tags=["Admin Deletes"])
 
 DELETE_SECRET = os.environ.get("DELETE_CONFIRM_SECRET", "dev-secret-change-me")
 TTL_SECONDS = 5 * 60
+
+def cleanup_email_campaign_attachments(
+    db: Session,
+    campaign_id: int,
+) -> list[str]:
+    links = (
+        db.query(EmailCampaignAttachment)
+        .filter(
+            EmailCampaignAttachment.campaign_id == campaign_id
+        )
+        .all()
+    )
+
+    if not links:
+        return []
+
+    file_ids = list({
+        link.file_id
+        for link in links
+    })
+
+    for link in links:
+        db.delete(link)
+
+    db.flush()
+
+    physical_paths = []
+
+    for file_id in file_ids:
+        stored = (
+            db.query(StoredFile)
+            .filter(
+                StoredFile.file_id == file_id
+            )
+            .first()
+        )
+
+        if not stored:
+            continue
+
+        reference_count = stored_file_reference_count(
+            db,
+            file_id,
+        )
+
+        if reference_count == 0:
+            physical_paths.append(
+                stored.storage_path
+            )
+
+            db.delete(stored)
+
+    db.flush()
+
+    return physical_paths
 
 def log_cleanup_event(
     db: Session,
@@ -54,6 +123,88 @@ def log_cleanup_event(
             confirmation_text=confirmation_text,
         )
     )
+
+def cleanup_forum_post_attachments(
+    db: Session,
+    post_ids: list[int],
+) -> list[str]:
+    """
+    Remove attachment links for the supplied forum posts.
+
+    Any StoredFile that has no remaining references after the
+    links are removed is deleted from the database.
+
+    Returns storage paths whose physical files should be deleted
+    AFTER the database transaction commits successfully.
+    """
+
+    if not post_ids:
+        return []
+
+    links = (
+        db.query(ForumPostAttachment)
+        .filter(
+            ForumPostAttachment.post_id.in_(post_ids)
+        )
+        .all()
+    )
+
+    if not links:
+        return []
+
+    #
+    # A file may be referenced more than once, including by
+    # multiple posts in this same topic.
+    #
+    file_ids = list({
+        link.file_id
+        for link in links
+    })
+
+    #
+    # Remove ALL links belonging to the posts first.
+    #
+    for link in links:
+        db.delete(link)
+
+    #
+    # Make those removals visible to the reference-count queries.
+    #
+    db.flush()
+
+    physical_paths = []
+
+    #
+    # Delete StoredFile rows only when absolutely nothing
+    # references them anymore.
+    #
+    for file_id in file_ids:
+        stored = (
+            db.query(StoredFile)
+            .filter(
+                StoredFile.file_id == file_id
+            )
+            .first()
+        )
+
+        if not stored:
+            continue
+
+        reference_count = stored_file_reference_count(
+            db,
+            file_id,
+        )
+
+        if reference_count == 0:
+            physical_paths.append(
+                stored.storage_path
+            )
+
+            db.delete(stored)
+
+    db.flush()
+
+    return physical_paths
 
 def dog_headshot_count(db: Session, dog_ids: list[int]) -> int:
     if not dog_ids:
@@ -1434,6 +1585,130 @@ def hard_delete_user_tree(
         db.rollback()
         raise
 
+def email_campaign_hash_payload(
+    *,
+    campaign_id: int,
+    subject: str,
+    will_delete: dict,
+    confirm_text_required: str,
+    expires_at: int,
+):
+    return {
+        "entity": "email_campaign",
+        "mode": "delete_email_campaign",
+        "campaign_id": campaign_id,
+        "subject": subject,
+        "will_delete": will_delete,
+        "confirm_text_required": confirm_text_required,
+        "expires_at": expires_at,
+    }
+
+
+def preview_email_campaign_cleanup(
+    db: Session,
+    campaign_id: int,
+):
+    campaign = (
+        db.query(EmailCampaign)
+        .filter(
+            EmailCampaign.campaign_id == campaign_id
+        )
+        .first()
+    )
+
+    if not campaign:
+        raise HTTPException(
+            status_code=404,
+            detail="Email campaign not found",
+        )
+
+    recipient_count = (
+        db.query(EmailCampaignRecipient)
+        .filter(
+            EmailCampaignRecipient.campaign_id == campaign_id
+        )
+        .count()
+    )
+
+    attachment_links = (
+        db.query(EmailCampaignAttachment)
+        .filter(
+            EmailCampaignAttachment.campaign_id == campaign_id
+        )
+        .all()
+    )
+
+    attachment_count = len(attachment_links)
+
+    file_ids = list({
+        link.file_id
+        for link in attachment_links
+    })
+
+    stored_files_to_delete = 0
+
+    for file_id in file_ids:
+        #
+        # Determine whether deleting THIS campaign's links would
+        # leave the stored file completely unreferenced.
+        #
+        total_refs = stored_file_reference_count(
+            db,
+            file_id,
+        )
+
+        campaign_refs = sum(
+            1
+            for link in attachment_links
+            if link.file_id == file_id
+        )
+
+        if total_refs - campaign_refs == 0:
+            stored_files_to_delete += 1
+
+    will_delete = {
+        "email_campaigns": 1,
+        "email_campaign_recipients": recipient_count,
+        "email_campaign_attachments": attachment_count,
+        "stored_files": stored_files_to_delete,
+    }
+
+    expires_at = _now() + TTL_SECONDS
+
+    confirm_text_required = (
+        f"DELETE EMAIL CAMPAIGN {campaign_id}"
+    )
+
+    subject = campaign.subject or ""
+
+    hash_payload = email_campaign_hash_payload(
+        campaign_id=campaign.campaign_id,
+        subject=subject,
+        will_delete=will_delete,
+        confirm_text_required=confirm_text_required,
+        expires_at=expires_at,
+    )
+
+    return {
+        "entity": "email_campaign",
+        "mode": "delete_email_campaign",
+        "campaign_id": campaign.campaign_id,
+        "label": (
+            f"Email Campaign: "
+            f"{campaign.subject or '(No subject)'}"
+        ),
+        "subject": campaign.subject,
+        "sent_at": campaign.sent_at,
+        "recipient_count": campaign.recipient_count,
+        "will_delete": will_delete,
+        "sample_ids": {
+            "file_ids": file_ids[:10],
+        },
+        "expires_at": expires_at,
+        "confirm_hash": _hmac(hash_payload),
+        "confirm_text_required": confirm_text_required,
+    }
+
 def topic_tree_hash_payload(
     *,
     topic_id: int,
@@ -1452,6 +1727,142 @@ def topic_tree_hash_payload(
         "will_delete": will_delete,
         "confirm_text_required": confirm_text_required,
         "expires_at": expires_at,
+    }
+
+@router.get(
+    "/email-campaigns/{campaign_id}/delete-preview"
+)
+def preview_email_campaign_delete(
+    campaign_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+    _mfa=Depends(require_mfa_verified),
+):
+    return preview_email_campaign_cleanup(
+        db,
+        campaign_id,
+    )
+
+@router.post(
+    "/email-campaigns/{campaign_id}/hard-delete"
+)
+def hard_delete_email_campaign(
+    campaign_id: int,
+    payload: CleanupConfirmIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+    _mfa=Depends(require_mfa_verified),
+):
+    if payload.expires_at < _now():
+        raise HTTPException(
+            status_code=400,
+            detail="Confirmation expired",
+        )
+
+    preview = preview_email_campaign_cleanup(
+        db,
+        campaign_id,
+    )
+
+    expected_text = (
+        f"DELETE EMAIL CAMPAIGN {campaign_id}"
+    )
+
+    if payload.confirm_text != expected_text:
+        raise HTTPException(
+            status_code=400,
+            detail="Confirmation text does not match",
+        )
+
+    hash_payload = email_campaign_hash_payload(
+        campaign_id=preview["campaign_id"],
+        subject=preview["subject"] or "",
+        will_delete=preview["will_delete"],
+        confirm_text_required=expected_text,
+        expires_at=payload.expires_at,
+    )
+
+    if payload.confirm_hash != _hmac(hash_payload):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid confirmation hash",
+        )
+
+    try:
+        physical_paths = (
+            cleanup_email_campaign_attachments(
+                db,
+                campaign_id,
+            )
+        )
+
+        recipients_deleted = (
+            db.query(EmailCampaignRecipient)
+            .filter(
+                EmailCampaignRecipient.campaign_id
+                == campaign_id
+            )
+            .delete(
+                synchronize_session=False
+            )
+        )
+
+        campaign_deleted = (
+            db.query(EmailCampaign)
+            .filter(
+                EmailCampaign.campaign_id
+                == campaign_id
+            )
+            .delete(
+                synchronize_session=False
+            )
+        )
+
+        deleted_counts = {
+            "email_campaigns": campaign_deleted,
+            "email_campaign_recipients":
+                recipients_deleted,
+            "email_campaign_attachments":
+                preview["will_delete"][
+                    "email_campaign_attachments"
+                ],
+            "stored_files":
+                preview["will_delete"]["stored_files"],
+        }
+
+        log_cleanup_event(
+            db,
+            actor_user_id=current_user.user_id,
+            action="hard_delete",
+            entity_type="email_campaign",
+            entity_id=campaign_id,
+            entity_label=preview["label"],
+            deleted_counts=deleted_counts,
+            affected_ids={
+                "campaign_ids": [campaign_id],
+            },
+            confirmation_text=payload.confirm_text,
+        )
+
+        db.commit()
+
+    except Exception:
+        db.rollback()
+        raise
+
+    #
+    # Physical files only after successful DB commit.
+    #
+    for storage_path in physical_paths:
+        delete_physical_file(
+            storage_path
+        )
+
+    return {
+        "status": "deleted",
+        "entity": "email_campaign",
+        "campaign_id": campaign_id,
+        **deleted_counts,
     }
 
 def preview_topic_tree(db: Session, topic_id: int):
@@ -1476,6 +1887,59 @@ def preview_topic_tree(db: Session, topic_id: int):
             .all()
         )
     ]
+
+    forum_post_attachments = (
+        db.query(ForumPostAttachment)
+        .filter(ForumPostAttachment.post_id.in_(post_ids))
+        .count()
+        if post_ids
+        else 0
+    )
+
+    attachment_file_ids = (
+        [
+            file_id
+            for (file_id,) in (
+                db.query(ForumPostAttachment.file_id)
+                .filter(ForumPostAttachment.post_id.in_(post_ids))
+                .distinct()
+                .all()
+            )
+        ]
+        if post_ids
+        else []
+    )
+
+    unreferenced_stored_files = 0
+
+    for file_id in attachment_file_ids:
+        #
+        # Count references that are OUTSIDE the topic being deleted.
+        #
+        other_forum_refs = (
+            db.query(ForumPostAttachment)
+            .filter(ForumPostAttachment.file_id == file_id)
+            .filter(~ForumPostAttachment.post_id.in_(post_ids))
+            .count()
+        )
+
+        if other_forum_refs == 0:
+            #
+            # This also protects future email-campaign references.
+            #
+            total_refs = stored_file_reference_count(db, file_id)
+
+            topic_refs = (
+                db.query(ForumPostAttachment)
+                .filter(
+                    ForumPostAttachment.file_id == file_id,
+                    ForumPostAttachment.post_id.in_(post_ids),
+                )
+                .count()
+            )
+
+            if total_refs == topic_refs:
+                unreferenced_stored_files += 1
 
     forum_ballot_choices = (
         db.query(ForumBallotChoice)
@@ -1510,6 +1974,8 @@ def preview_topic_tree(db: Session, topic_id: int):
     will_delete = {
         "forum_topics": 1,
         "forum_posts": len(post_ids),
+        "forum_post_attachments": forum_post_attachments,
+        "stored_files": unreferenced_stored_files,
         "forum_ballots": len(ballot_ids),
         "forum_ballot_choices": forum_ballot_choices,
         "forum_ballot_votes": forum_ballot_votes,
@@ -1608,6 +2074,32 @@ def delete_topic_cleanup(
             ForumBallotChoice.ballot_id.in_(ballot_ids)
         ).delete(synchronize_session=False)
 
+    #
+    # Collect the topic's posts before deleting anything.
+    #
+    post_ids = [
+        post_id
+        for (post_id,) in (
+            db.query(ForumPost.post_id)
+            .filter(
+                ForumPost.topic_id == topic_id
+            )
+            .all()
+        )
+    ]
+
+    #
+    # Remove forum attachment links and mark any now-unreferenced
+    # StoredFile rows for deletion.
+    #
+    physical_paths = cleanup_forum_post_attachments(
+        db,
+        post_ids,
+    )
+
+    #
+    # Existing topic/survey cleanup continues normally.
+    #
     db.query(ForumBallot).filter(
         ForumBallot.topic_id == topic_id
     ).delete(synchronize_session=False)
@@ -1624,7 +2116,17 @@ def delete_topic_cleanup(
         ForumTopic.topic_id == topic_id
     ).delete(synchronize_session=False)
 
+    #
+    # Commit ALL database changes first.
+    #
     db.commit()
+
+    #
+    # Only after the DB transaction succeeds do we touch the
+    # physical filesystem.
+    #
+    for storage_path in physical_paths:
+        delete_physical_file(storage_path)
 
     return {
         "status": "deleted",

@@ -12,6 +12,10 @@ from app.models.discipline_group import DisciplineGroup
 from app.models.user_discipline_group import user_discipline_groups
 from sqlalchemy import Table, Column, Integer, ForeignKey
 from sqlalchemy.orm import relationship
-
+from app.models.stored_files import (
+    StoredFile,
+    ForumPostAttachment,
+    EmailCampaignAttachment,
+)
 
 

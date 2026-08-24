@@ -1,7 +1,7 @@
 # app/schemas/email_campaigns.py
 
 from typing import Optional, List
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class EmailAudienceFilters(BaseModel):
@@ -39,7 +39,7 @@ class EmailAudienceSendRequest(BaseModel):
     subject: str
     body_text: str
     enable_reply: bool = False
-
+    attachment_file_ids: list[int] = Field(default_factory=list)
 
 class EmailAudienceSendOut(BaseModel):
     campaign_id: int

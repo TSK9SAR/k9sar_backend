@@ -62,6 +62,17 @@ class ForumPostCreate(BaseModel):
     body_md: str = Field(..., min_length=1)
 
 
+class ForumAttachmentOut(BaseModel):
+    attachment_id: int
+    file_id: int
+    original_filename: str
+    mime_type: str | None = None
+    file_size: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
 class ForumPostOut(BaseModel):
     post_id: int
     topic_id: int
@@ -73,6 +84,8 @@ class ForumPostOut(BaseModel):
     edited_at: Optional[datetime] = None
     deleted_at: Optional[datetime] = None
     created_at: datetime
+
+    attachments: list[ForumAttachmentOut] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
@@ -212,4 +225,3 @@ class CleanupConfirmIn(BaseModel):
     confirm_text: str
     expires_at: int
     confirm_hash: str
-    
