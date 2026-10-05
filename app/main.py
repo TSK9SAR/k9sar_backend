@@ -45,6 +45,7 @@ from app.routes.webauthn_routes import router as webauthn_router
 from app.routes import oauth_routes
 from app.routes import help_videos
 from app.routes import forum
+from app.routes import forum_inbound_email
 from app.routes import admin_email_campaigns
 from app.routes.help import router as help_router, admin_router as admin_help_router
 from app.routes import admin_forum_surveys
@@ -172,6 +173,7 @@ app.include_router(admin_handler_affiliations_router, prefix="/api")  # <-- from
 app.include_router(webauthn_router, prefix="/api")  # <-- from webauthn_routes.py
 app.include_router(help_videos.router, prefix="/api")  # <-- from help_videois.py
 app.include_router(forum.router)
+app.include_router(forum_inbound_email.router)
 app.include_router(admin_email_campaigns.router, prefix="/api")
 app.include_router(help_router, prefix="/api")
 app.include_router(admin_help_router, prefix="/api")

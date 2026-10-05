@@ -1,0 +1,13 @@
+name = "k9sar-forum-email"
+main = "worker.mjs"
+compatibility_date = "2026-10-04"
+workers_dev = false
+preview_urls = false
+
+# Deliberately omit addresses/routes: deployment must not reconcile or replace
+# existing no-reply forwarding or the domain's catch-all rule.
+[vars]
+FORUM_REPLY_DOMAIN = "tsk9sar.org"
+FORUM_INBOUND_URL = "https://tsk9sar.org/api/forums/inbound-email"
+
+# Set using: wrangler secret put FORUM_INBOUND_SECRET

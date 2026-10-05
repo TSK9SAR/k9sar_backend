@@ -5,6 +5,8 @@ from app.services.mailer import send_email  # adjust to your actual mailer funct
 from app.database import SessionLocal
 from app.models.forum import ForumTopic, ForumPost
 from app.services.forum_link_tokens import create_forum_email_token
+from app.services.forum_email_replies import create_reply_address, REPLY_MARKER
+import logging
 
 def _full_name(user: User) -> str:
     first = getattr(user, "first_name", "") or ""
@@ -210,6 +212,15 @@ def _send_forum_notifications(
             f"/forums/email-entry/{forum_token}"
         )
 
+        reply_to = None
+        if not topic.is_locked or "admin" in _user_role_names(user):
+            try:
+                reply_to = create_reply_address(
+                    user_id=user.user_id, topic_id=topic.topic_id, email=user.email,
+                )
+            except RuntimeError:
+                logging.getLogger(__name__).error("Forum reply configuration is incomplete")
+
         body = f"""\
 {author_name} {action_text} in {category.name}:
 
@@ -219,6 +230,14 @@ VIEW DISCUSSION AND REPLY:
 {topic_url}
 
 """
+
+        if reply_to:
+            body = (
+                f"{REPLY_MARKER}\n"
+                "Reply to this email to post to the discussion. Write above the quoted message.\n"
+                "Only text is posted; attachments are ignored. Use your registered email address.\n\n"
+                + body
+            )
 
         try:
             print(
@@ -231,7 +250,7 @@ VIEW DISCUSSION AND REPLY:
                 subject=subject,
                 text_body=body,
                 html_body=None,
-                reply_to=None,
+                reply_to=reply_to,
             )
 
             if ok:

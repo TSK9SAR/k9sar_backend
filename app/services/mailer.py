@@ -66,7 +66,7 @@ def send_email(
     if reply_to:
         msg["Reply-To"] = reply_to
         print(
-            f"[MAIL] reply-to={reply_to}",
+            "[MAIL] reply-to=(set)",
             flush=True,
         )
     else:

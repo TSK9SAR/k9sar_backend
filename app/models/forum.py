@@ -80,6 +80,15 @@ class ForumPost(Base):
     )
 
 
+class ForumEmailReceipt(Base):
+    __tablename__ = "forum_email_receipts"
+
+    delivery_key = Column(String(64), primary_key=True)
+    # Keep the receipt even if a moderator permanently deletes the post.
+    post_id = Column(Integer, nullable=False)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+
 class ForumUserSetting(Base):
     __tablename__ = "forum_user_settings"
 
