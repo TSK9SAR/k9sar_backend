@@ -628,6 +628,7 @@ def get_topic(
     return ForumTopicDetailOut(
         topic_id=topic.topic_id,
         category_id=topic.category_id,
+        category_name=topic.category.name,
         title=topic.title,
         topic_type=topic.topic_type,
         related_standard_id=topic.related_standard_id,
@@ -1690,5 +1691,3 @@ def create_topic_poll_question(
     db.refresh(ballot)
 
     return _ballot_out(db, ballot, current_user)
-
-    

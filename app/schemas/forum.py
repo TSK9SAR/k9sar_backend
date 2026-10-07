@@ -94,6 +94,7 @@ class ForumPostOut(BaseModel):
 class ForumTopicDetailOut(BaseModel):
     topic_id: int
     category_id: int
+    category_name: Optional[str] = None
     title: str
     topic_type: str
     related_standard_id: Optional[int] = None

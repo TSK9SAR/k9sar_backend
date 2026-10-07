@@ -49,6 +49,7 @@ from app.routes import forum_inbound_email
 from app.routes import admin_email_campaigns
 from app.routes.help import router as help_router, admin_router as admin_help_router
 from app.routes import admin_forum_surveys
+from app.routes import admin_forum_management
 from app.routes import public_embeds
 from app.routes import id_headshots
 from app.routes import id_cards
@@ -178,6 +179,7 @@ app.include_router(admin_email_campaigns.router, prefix="/api")
 app.include_router(help_router, prefix="/api")
 app.include_router(admin_help_router, prefix="/api")
 app.include_router(admin_forum_surveys.router, prefix="/api")
+app.include_router(admin_forum_management.router, prefix="/api")
 app.include_router(public_embeds.router, prefix="/api")  # <-- from public_embeds.py
 app.include_router(id_headshots.router, prefix="/api")
 app.include_router(id_cards.router, prefix="/api")

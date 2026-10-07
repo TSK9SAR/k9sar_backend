@@ -9,6 +9,8 @@ operating documentation with changes.
   `create_all`. Use isolated databases for development, tests and import probes.
 - Run the isolated forum tests with
   `python -m unittest discover -s tests -p 'test_forum_email*.py' -v`.
+  Category/move changes also require
+  `python -m unittest discover -s tests -p 'test_forum_management.py' -v`.
 - Worker changes need both Node tests and the workerd runtime test; see
   `docs/forum-email-replies.md`. Keep redirect refusal and receipt idempotency.
 - Keep credentials, environment files, private keys and member data out of commits

@@ -92,13 +92,12 @@ def send_new_topic_notifications(
 ):
     db = SessionLocal()
     try:
-        category = db.query(ForumCategory).filter(
-            ForumCategory.category_id == category_id
-        ).first()
-
         topic = db.query(ForumTopic).filter(
             ForumTopic.topic_id == topic_id
         ).first()
+
+        # A topic may have moved since this background task was queued.
+        category = db.get(ForumCategory, topic.category_id) if topic else None
 
         post = db.query(ForumPost).filter(
             ForumPost.post_id == post_id
@@ -135,13 +134,11 @@ def send_new_reply_notifications(
 ):
     db = SessionLocal()
     try:
-        category = db.query(ForumCategory).filter(
-            ForumCategory.category_id == category_id
-        ).first()
-
         topic = db.query(ForumTopic).filter(
             ForumTopic.topic_id == topic_id
         ).first()
+
+        category = db.get(ForumCategory, topic.category_id) if topic else None
 
         post = db.query(ForumPost).filter(
             ForumPost.post_id == post_id
@@ -178,6 +175,9 @@ def _send_forum_notifications(
     public_base_url: str,
     kind: str,  # "topic" or "reply"
 ):
+    if not category.is_active:
+        return
+
     users = db.query(User).filter(User.is_active == True).all()
 
     if kind == "reply":
