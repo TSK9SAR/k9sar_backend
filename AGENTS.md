@@ -11,6 +11,8 @@ operating documentation with changes.
   `python -m unittest discover -s tests -p 'test_forum_email*.py' -v`.
   Category/move changes also require
   `python -m unittest discover -s tests -p 'test_forum_management.py' -v`.
+- Invitation history changes require
+  `python -m unittest discover -s tests -p 'test_invitation_history.py' -v`.
 - Worker changes need both Node tests and the workerd runtime test; see
   `docs/forum-email-replies.md`. Keep redirect refusal and receipt idempotency.
 - Keep credentials, environment files, private keys and member data out of commits

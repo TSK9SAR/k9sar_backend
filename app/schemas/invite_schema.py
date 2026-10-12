@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, List
+from typing import Optional, List, Literal
 from datetime import datetime
 
 class InviteCreate(BaseModel):
@@ -42,3 +42,32 @@ class InviteAcceptIn(BaseModel):
 class InviteAcceptOut(BaseModel):
     ok: bool
     user_id: int
+
+
+class InviteHistoryItem(BaseModel):
+    invite_id: int
+    email: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    created_by_name: Optional[str] = None
+    created_at: datetime
+    expires_at: datetime
+    completed_at: Optional[datetime] = None
+    status: Literal["pending", "completed", "expired"]
+    remaining_seconds: int
+
+
+class InviteHistoryCounts(BaseModel):
+    all: int
+    pending: int
+    completed: int
+    expired: int
+
+
+class InviteHistoryOut(BaseModel):
+    items: List[InviteHistoryItem]
+    total: int
+    counts: InviteHistoryCounts
+    page: int
+    page_size: int
+    evaluated_at: datetime

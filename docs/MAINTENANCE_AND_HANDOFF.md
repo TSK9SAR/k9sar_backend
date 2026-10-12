@@ -18,6 +18,7 @@ Keep project-wide procedures in that one canonical guide. Keep backend email
 implementation details in [forum-email-replies.md](forum-email-replies.md).
 Category maintenance and topic moves are described in
 [forum-management.md](forum-management.md).
+Invitation history is described in [invitation-history.md](invitation-history.md).
 Update the guide with infrastructure changes; do not store credentials or member
 records in documentation.
 
