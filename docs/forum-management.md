@@ -130,5 +130,8 @@ nine topic-deletion tests with foreign-key enforcement, shared forum/campaign fi
 rollback, same-count edits, expired/tampered/cross-actor/action tokens, hidden/locked
 topics, cleanup failures, retained receipts and rejected old replies. The management
 suite checks role and MFA restrictions on both deletion endpoints. Desktop/mobile
-browser checks used synthetic API data. This change is prepared for deployment;
-consult the canonical maintenance guide for actual deployment status.
+browser checks used synthetic API data. Deployed with owner approval on 2026-10-23
+at 17:08:26 UTC, from application commit `207a55fdad2e` and frontend build
+`3daba20baa82`. Public assets/API routes and unauthenticated access rejection passed;
+no live discussion was deleted for testing. Consult the canonical maintenance guide
+for image, backup and rollback references.
