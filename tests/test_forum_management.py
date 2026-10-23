@@ -84,7 +84,9 @@ class ForumManagementTests(unittest.TestCase):
                   ("POST", "/categories/2/delete-preview", None),
                   ("POST", "/categories/2/delete-confirm", {"confirmation_token": "invalid", "confirm_text": "DELETE Private"}),
                   ("POST", "/topics/1/move-preview", {"destination_category_id": 2}),
-                  ("POST", "/topics/1/move-confirm", {"destination_category_id": 2, "confirmation_token": "invalid"})]
+                  ("POST", "/topics/1/move-confirm", {"destination_category_id": 2, "confirmation_token": "invalid"}),
+                  ("POST", "/topics/1/delete-preview", None),
+                  ("POST", "/topics/1/delete-confirm", {"confirmation_token": "invalid", "confirm_text": "DELETE TOPIC 1"})]
         for role in [None, Role(role_id=2, role_name="supervisor")]:
             if role:
                 self.author.roles.append(role)

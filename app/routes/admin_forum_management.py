@@ -1,7 +1,8 @@
-"""Administrator category maintenance and topic moves; no schema migration required."""
+"""Administrator category and topic management; no schema migration required."""
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import time
@@ -15,13 +16,17 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models.forum import ForumBallot, ForumCategory, ForumPost, ForumTopic
-from app.models.stored_files import ForumPostAttachment
+from app.models.forum import (ForumBallot, ForumBallotChoice, ForumBallotVote,
+                              ForumBallotFeedback, ForumCategory, ForumPost,
+                              ForumTopic, ForumTopicRead)
+from app.models.stored_files import ForumPostAttachment, StoredFile, EmailCampaignAttachment
+from app.services.stored_files import delete_physical_file
 from app.utils.auth import require_admin, require_mfa_verified
 
 router = APIRouter(prefix="/admin/forum", tags=["Forum management"], dependencies=[Depends(require_admin)])
 write_access = [Depends(require_mfa_verified)]
 CATEGORY_FIELDS = ("name", "description", "sortorder", "is_active", "min_role", "notify_default")
+logger = logging.getLogger(__name__)
 
 
 class CategoryIn(BaseModel):
@@ -236,3 +241,98 @@ def move_topic(topic_id: int, body: MoveConfirmation, db: Session = Depends(get_
     # No copying or deletion: posts, polls, attachments, read state, and email links retain their IDs.
     db.commit()
     return {"topic_id": topic_id, "category_id": body.destination_category_id, "category_name": state["destination"]["name"]}
+
+
+def _topic_delete_state(db, topic_id):
+    # Lock parents before children. FK checks block new children while confirmation
+    # is in progress. Locking reads also avoid an older MySQL transaction snapshot.
+    topic = db.query(ForumTopic).filter(ForumTopic.topic_id == topic_id).populate_existing().with_for_update().first()
+    if topic is None:
+        raise HTTPException(404, "Topic not found.")
+    category = _category(db, topic.category_id, lock=True)
+
+    def rows(model, condition):
+        return (db.query(model).filter(condition).order_by(*model.__table__.primary_key.columns)
+                .populate_existing().with_for_update().all())
+
+    posts = rows(ForumPost, ForumPost.topic_id == topic_id)
+    polls = rows(ForumBallot, ForumBallot.topic_id == topic_id)
+    post_ids = [post.post_id for post in posts]
+    poll_ids = [poll.ballot_id for poll in polls]
+    groups = [
+        (ForumBallotFeedback, rows(ForumBallotFeedback, ForumBallotFeedback.ballot_id.in_(poll_ids))),
+        (ForumBallotVote, rows(ForumBallotVote, ForumBallotVote.ballot_id.in_(poll_ids))),
+        (ForumBallotChoice, rows(ForumBallotChoice, ForumBallotChoice.ballot_id.in_(poll_ids))),
+        (ForumBallot, polls),
+        (ForumPostAttachment, rows(ForumPostAttachment, ForumPostAttachment.post_id.in_(post_ids))),
+        (ForumPost, posts),
+    ]
+
+    def record(row):
+        # Include contents, IDs and timestamps, so same-count replacements and
+        # edits within a single timestamp second invalidate the reviewed state.
+        values = {col.name: getattr(row, col.name) for col in row.__table__.columns}
+        return {key: value.isoformat() if hasattr(value, "isoformat") else value for key, value in values.items()}
+
+    revision = _digest([record(topic), *[[record(row) for row in records] for _, records in groups]])
+    state = {"topic_id": topic_id, "title": topic.title, "category": _category_state(category),
+             "post_count": len(posts), "poll_count": len(polls),
+             "vote_count": len(groups[1][1]), "feedback_count": len(groups[0][1]),
+             "attachment_count": len(groups[4][1]), "content_revision": revision,
+             "confirm_text": f"DELETE TOPIC {topic_id}"}
+    return state, groups
+
+
+@router.post("/topics/{topic_id}/delete-preview", dependencies=write_access)
+def topic_delete_preview(topic_id: int, db: Session = Depends(get_db), actor=Depends(require_admin)):
+    state, _ = _topic_delete_state(db, topic_id)
+    return _preview(actor, "delete-topic", state)
+
+
+@router.post("/topics/{topic_id}/delete-confirm", dependencies=write_access)
+def delete_topic(topic_id: int, body: DeleteConfirmation, db: Session = Depends(get_db), actor=Depends(require_admin)):
+    state, groups = _topic_delete_state(db, topic_id)
+    _verify(body.confirmation_token, actor, "delete-topic", state)
+    if body.confirm_text != state["confirm_text"]:
+        raise HTTPException(400, "The confirmation text does not match.")
+
+    file_ids = sorted({link.file_id for link in groups[4][1]})
+    files = (db.query(StoredFile).filter(StoredFile.file_id.in_(file_ids))
+             .order_by(StoredFile.file_id).with_for_update().all())
+    physical_files = []
+    try:
+        # Explicit child-first deletion preserves unrelated discussions and avoids
+        # depending on undocumented database/ORM cascades.
+        for model, records in groups:
+            pk = list(model.__table__.primary_key.columns)[0]
+            if records:
+                db.query(model).filter(pk.in_([getattr(row, pk.name) for row in records])).delete(synchronize_session=False)
+        db.query(ForumTopicRead).filter(ForumTopicRead.topic_id == topic_id).delete(synchronize_session=False)
+        db.query(ForumTopic).filter(ForumTopic.topic_id == topic_id).delete(synchronize_session=False)
+
+        for stored in files:
+            # Current reads plus the locked file row protect shared attachments,
+            # including files used in email campaigns, from concurrent linking.
+            forum_ref = (db.query(ForumPostAttachment.attachment_id)
+                         .filter(ForumPostAttachment.file_id == stored.file_id).with_for_update().first())
+            campaign_ref = (db.query(EmailCampaignAttachment.attachment_id)
+                            .filter(EmailCampaignAttachment.file_id == stored.file_id).with_for_update().first())
+            if forum_ref is None and campaign_ref is None:
+                physical_files.append((stored.file_id, stored.storage_path))
+                db.delete(stored)
+        # ForumEmailReceipt deliberately survives deletion to prevent email replay.
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "The discussion changed or still has related content. Review it again before deleting.")
+
+    cleanup_pending = 0
+    for file_id, storage_path in physical_files:
+        try:
+            delete_physical_file(storage_path)
+        except (OSError, ValueError, RuntimeError):
+            # Do not report a failed deletion after the database already committed.
+            cleanup_pending += 1
+            logger.warning("Topic deleted; physical cleanup pending for stored file id=%s", file_id)
+    return {"deleted_topic_id": topic_id, "category_id": state["category"]["category_id"],
+            "stored_files_deleted": len(physical_files), "file_cleanup_pending": cleanup_pending}

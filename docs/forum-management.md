@@ -1,15 +1,15 @@
-# Forum category management and topic moves
+# Forum category and topic management
 
 Implemented in `app/routes/admin_forum_management.py`, registered under
 `/api/admin/forum`. The frontend exposes **Administrator → Manage Forums & Surveys**
 at `/admin/forums`, with a link to the existing survey reports. A topic's
-**Move Topic** link opens the page filtered to that discussion.
+**Manage Topic** link opens the page filtered to that discussion.
 
 ## Permissions and behavior
 
 Every endpoint enforces `require_admin`. Writes and delete/move previews also
 enforce `require_mfa_verified`. The role check is independent of frontend navigation.
-Members and supervisors cannot manage categories or move topics.
+Members and supervisors cannot manage categories, move topics or delete topics.
 
 Categories support a name, description, display order, visibility, minimum role
 (`member`, `evaluator`, `supervisor`, `admin`) and default email preference (`none`,
@@ -44,6 +44,8 @@ All paths below have the prefix `/api/admin/forum`.
 | GET | `/topics` | Optional `q`, `category_id`, `topic_id`, `offset`, `limit` (default 25, maximum 100); returns `items`, `total` |
 | POST | `/topics/{id}/move-preview` | `destination_category_id`; returns source/destination, content counts and confirmation token |
 | POST | `/topics/{id}/move-confirm` | `destination_category_id`, `confirmation_token` |
+| POST | `/topics/{id}/delete-preview` | Returns title/category, post/poll/vote/feedback/attachment counts, content revision, confirmation text/token and expiry |
+| POST | `/topics/{id}/delete-confirm` | Exact `DELETE TOPIC {id}` as `confirm_text`, plus `confirmation_token`; returns deleted ID and file cleanup status |
 
 Category edits use a SHA-256 revision of the current category configuration and a
 row lock to reject stale overwrites. Delete/move tokens expire in five minutes,
@@ -58,6 +60,30 @@ Counts are also included, so added content may require reviewing again. Repeated
 confirmations fail because the topic has already moved or the category is gone.
 Invalid/stale/expired previews and nonempty deletes return 409; missing entities
 return 404. Reload/review rather than retrying the same confirmation indefinitely.
+
+## Permanent topic deletion
+
+Choose **Delete topic → Review deletion**, review the content counts, type the
+exact confirmation text, and select **Permanently delete topic**. Topics in hidden
+categories and locked/pinned topics can be deleted by an MFA-verified administrator.
+The state digest includes all topic/post/poll/choice/vote/feedback/attachment row
+values and IDs, so edits or same-count replacements also invalidate a preview.
+Read-marker timestamps are intentionally excluded. Both phases use locking reads;
+confirmation locks parents before children and deletes children before parents.
+Existing foreign keys prevent concurrent child insertion while their parents are
+locked. Unexpected relationships fail closed with 409 and roll back all deletes.
+
+Deletion removes the topic and all associated posts (including soft-deleted posts),
+polls, choices, votes, feedback, read markers and attachment links. It preserves
+`ForumEmailReceipt` rows and any file referenced by another post or email campaign.
+Unreferenced stored-file rows are removed in the transaction, with physical cleanup
+only after commit. On filesystem failure the response remains successful and
+reports `file_cleanup_pending`; a warning contains the file ID, without personal
+content or file paths. Recover the orphan path from backup metadata for manual
+cleanup. Code rollback cannot undo a confirmed content/file deletion.
+
+Old topic links and email replies return not-found; queued notifications skip the
+missing topic. Topic deletion sends no email and changes no forwarding routes.
 
 ## Email behavior
 
@@ -81,6 +107,7 @@ and mock email delivery. Run both suites:
 
 ```bash
 python -m unittest discover -s tests -p 'test_forum_management.py' -v
+python -m unittest discover -s tests -p 'test_forum_topic_deletion.py' -v
 python -m unittest discover -s tests -p 'test_forum_email*.py' -v
 ```
 
@@ -97,3 +124,11 @@ variable, file migration or Worker deployment is required. Use the canonical
 for the production container's three mounts, build exclusions and rollback.
 Rolling back the code leaves category settings and completed topic moves in the
 existing database; restore them through a reviewed management operation if needed.
+
+On 2026-10-23, all 46 backend tests passed in a network-disabled container, including
+nine topic-deletion tests with foreign-key enforcement, shared forum/campaign files,
+rollback, same-count edits, expired/tampered/cross-actor/action tokens, hidden/locked
+topics, cleanup failures, retained receipts and rejected old replies. The management
+suite checks role and MFA restrictions on both deletion endpoints. Desktop/mobile
+browser checks used synthetic API data. This change is prepared for deployment;
+consult the canonical maintenance guide for actual deployment status.
